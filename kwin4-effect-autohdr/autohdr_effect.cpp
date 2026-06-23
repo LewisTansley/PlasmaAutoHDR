@@ -591,6 +591,25 @@ namespace KWin {
         return AutoHdr::findAppKeyForIdentifiers(m_config, ids.desktopFile, ids.resourceClass, ids.windowClass);
     }
 
+    QString AutoHDREffect::resolvedAppKeyForWindow(EffectWindow *window) const
+    {
+        if (!window) {
+            return QString();
+        }
+
+        const QString knownKey = findKnownAppKey(window);
+        if (!knownKey.isEmpty()) {
+            return knownKey;
+        }
+
+        const QString derivedKey = appKeyForWindow(window);
+        if (!derivedKey.isEmpty() && AutoHdr::hasAppProfile(m_config, derivedKey)) {
+            return derivedKey;
+        }
+
+        return QString();
+    }
+
     AutoHDREffect::CalibrationSettings AutoHDREffect::settingsForAppKey(const QString &appKey) const
     {
         if (!appKey.isEmpty()) {
@@ -610,13 +629,9 @@ namespace KWin {
             return settingsForAppKey(m_calibratingAppKey);
         }
 
-        if (m_activeWindows.contains(window)) {
-            return m_activeWindows.value(window);
-        }
-
-        const QString knownKey = findKnownAppKey(window);
-        if (!knownKey.isEmpty()) {
-            return settingsForAppKey(knownKey);
+        const QString key = resolvedAppKeyForWindow(window);
+        if (!key.isEmpty()) {
+            return settingsForAppKey(key);
         }
 
         return m_globalDefaults;
@@ -662,12 +677,70 @@ namespace KWin {
             if (window == m_calibratingWindow && !m_calibratingAppKey.isEmpty()) {
                 settings = settingsForAppKey(m_calibratingAppKey);
             } else {
-                const QString knownKey = findKnownAppKey(window);
-                settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
+                const QString key = resolvedAppKeyForWindow(window);
+                settings = key.isEmpty() ? m_globalDefaults : settingsForAppKey(key);
             }
             AutoHdr::sanitizeCalibrationSettings(settings, m_hdrReferenceNits, m_hdrMaxDisplayNits);
             m_activeWindows.insert(window, settings);
         }
+    }
+
+    void AutoHDREffect::warnMissingToneCurveUniformsOnce()
+    {
+        if (m_warnedMissingToneCurveUniforms) {
+            return;
+        }
+        if (m_locUseToneCurve < 0) {
+            qWarning() << "AutoHDR Effect: tone curve shader uniform 'useToneCurve' not found; tone curve mode disabled";
+        }
+        if (m_locToneCurveLut < 0) {
+            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveLut' not found; tone curve mode disabled";
+        }
+        if (m_locToneCurveInputSpan < 0) {
+            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveInputSpan' not found; tone curve mode disabled";
+        }
+        m_warnedMissingToneCurveUniforms = true;
+    }
+
+    void AutoHDREffect::computeToneCurveLut(const CalibrationSettings &settings)
+    {
+        CalibrationSettings sanitized = settings;
+        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+
+        m_cachedUseToneCurve = sanitized.useToneCurve;
+        if (!sanitized.useToneCurve) {
+            m_toneCurveLutDirty = true;
+            return;
+        }
+
+        const AutoHdr::ToneCurveEndpoints endpoints =
+            AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+        const QVector<QPointF> fullCurve = AutoHdr::buildFullCurve(endpoints, sanitized.toneCurvePoints);
+        const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
+        m_cachedToneCurveInputSpan = inputSpan;
+        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        m_toneCurveLutDirty = true;
+    }
+
+    void AutoHDREffect::uploadToneCurveUniforms()
+    {
+        if (!m_shader || !m_shader->isValid() || !effects->makeOpenGLContextCurrent()) {
+            return;
+        }
+
+        warnMissingToneCurveUniformsOnce();
+
+        ShaderBinder binder(m_shader.get());
+        if (m_locUseToneCurve >= 0) {
+            m_shader->setUniform(m_locUseToneCurve, m_cachedUseToneCurve ? 1.0f : 0.0f);
+        }
+        if (m_cachedUseToneCurve && m_locToneCurveLut >= 0) {
+            glUniform1fv(m_locToneCurveLut, AutoHdr::kToneCurveLutSize, m_toneCurveLut);
+        }
+        if (m_cachedUseToneCurve && m_locToneCurveInputSpan >= 0) {
+            m_shader->setUniform(m_locToneCurveInputSpan, m_cachedToneCurveInputSpan);
+        }
+        m_toneCurveLutDirty = false;
     }
 
     void AutoHDREffect::resolveUniformLocations()
@@ -685,10 +758,16 @@ namespace KWin {
         m_locHighlightLift = m_shader->uniformLocation("highlightLift");
         m_locHighlightRange = m_shader->uniformLocation("highlightRange");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
+        m_locUseToneCurve = m_shader->uniformLocation("useToneCurve");
+        m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
+        m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
+        warnMissingToneCurveUniformsOnce();
     }
 
     void AutoHDREffect::updateUniforms(const CalibrationSettings &settings)
     {
+        computeToneCurveLut(settings);
+
         if (!m_shader || !m_shader->isValid() || !effects->makeOpenGLContextCurrent()) {
             return;
         }
@@ -698,8 +777,10 @@ namespace KWin {
 
         ShaderBinder binder(m_shader.get());
         if (m_locMaxNits >= 0) {
-            m_shader->setUniform(m_locMaxNits,
-                                 AutoHdr::effectiveMaxNits(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits));
+            const float peakUniform = sanitized.useToneCurve
+                ? qMin(sanitized.maxNits, m_hdrMaxDisplayNits)
+                : AutoHdr::effectiveMaxNits(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+            m_shader->setUniform(m_locMaxNits, peakUniform);
         }
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
@@ -722,6 +803,8 @@ namespace KWin {
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
         }
+
+        uploadToneCurveUniforms();
     }
 
     bool AutoHDREffect::loadShader()
@@ -822,7 +905,7 @@ namespace KWin {
             return;
         }
 
-        const QString knownKey = findKnownAppKey(window);
+        const QString knownKey = resolvedAppKeyForWindow(window);
         if (knownKey.isEmpty()) {
             return;
         }
@@ -845,7 +928,7 @@ namespace KWin {
         QList<EffectWindow *> toDeactivate;
         const QList<EffectWindow *> activeCopy = m_activeWindows.keys();
         for (EffectWindow *window : activeCopy) {
-            const QString knownKey = findKnownAppKey(window);
+            const QString knownKey = resolvedAppKeyForWindow(window);
             if (knownKey.isEmpty()) {
                 activateWindow(window, m_globalDefaults);
                 continue;
@@ -883,6 +966,9 @@ namespace KWin {
 
         if (m_activeWindows.contains(w) && m_shader && m_shader->isValid()) {
             updateUniforms(m_activeWindows.value(w));
+            if (m_toneCurveLutDirty) {
+                uploadToneCurveUniforms();
+            }
         }
 
         effects->prePaintWindow(view, w, data, presentTime);
@@ -893,6 +979,9 @@ namespace KWin {
     {
         if (m_activeWindows.contains(window) && m_shader && m_shader->isValid()) {
             updateUniforms(m_activeWindows.value(window));
+            if (m_toneCurveLutDirty) {
+                uploadToneCurveUniforms();
+            }
         }
         OffscreenEffect::drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
     }
@@ -923,14 +1012,14 @@ namespace KWin {
 
         if (m_pendingUnredirects.contains(active)) {
             m_pendingUnredirects.remove(active);
-            const QString knownKey = findKnownAppKey(active);
+            const QString knownKey = resolvedAppKeyForWindow(active);
             const CalibrationSettings settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
             activateWindow(active, settings);
             qInfo() << "AutoHDR Effect: re-enabled for" << active->windowClass();
             return;
         }
 
-        const QString knownKey = findKnownAppKey(active);
+        const QString knownKey = resolvedAppKeyForWindow(active);
         const CalibrationSettings settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
         activateWindow(active, settings);
         qInfo() << "AutoHDR Effect: enabled for" << active->windowClass();
@@ -995,8 +1084,7 @@ namespace KWin {
     void AutoHDREffect::repaintActiveWindows()
     {
         for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
-            updateUniforms(it.value());
-            it.key()->addRepaintFull();
+            activateWindow(it.key(), it.value());
         }
         if (!m_activeWindows.isEmpty()) {
             effects->addRepaintFull();
@@ -1160,8 +1248,7 @@ namespace KWin {
         m_calibratingAppKey = appKeyForWindow(active);
 
         if (!m_activeWindows.contains(active)) {
-            const QString knownKey = findKnownAppKey(active);
-            const CalibrationSettings settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
+            const CalibrationSettings settings = settingsForWindow(active);
             activateWindow(active, settings);
         }
 

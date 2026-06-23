@@ -13,6 +13,9 @@ uniform float highlightLift;
 uniform float highlightRange;
 uniform float colorVibrance;
 uniform float gamutExpansion;
+uniform float useToneCurve;
+uniform float toneCurveInputSpan;
+uniform float toneCurveLut[256];
 
 in vec2 texcoord0;
 out vec4 fragColor;
@@ -44,6 +47,17 @@ float mapTone(float t, float paperWhiteNits, float peakNits, float highlightExp,
     float retain = smoothstep(1.0, 1.0 + blendWidth, t);
 
     return mix(paperWhiteNits, highlightNits, retain);
+}
+
+float mapToneCurve(float inputNits, float inputSpan)
+{
+    float span = max(inputSpan, 1e-3);
+    float u = clamp(inputNits / span, 0.0, 1.0);
+    float idx = u * 255.0;
+    int i0 = int(floor(idx));
+    int i1 = min(i0 + 1, 255);
+    float f = fract(idx);
+    return mix(toneCurveLut[i0], toneCurveLut[i1], f);
 }
 
 vec3 applyColorControls(vec3 rgb, float sat, float vib)
@@ -154,7 +168,13 @@ void main()
     t = max(t - blackPoint, 0.0) / max(1.0 - blackPoint, 1e-6);
 
     float paperWhiteNits = clamp(midPoint, 80.0, 480.0);
-    float Yn = mapTone(t, paperWhiteNits, peakNits, highlightExpansion, highlightLift, highlightRange);
+    float Yn;
+    if (useToneCurve > 0.5) {
+        float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : paperWhiteNits;
+        Yn = mapToneCurve(lumaNits, curveSpan);
+    } else {
+        Yn = mapTone(t, paperWhiteNits, peakNits, highlightExpansion, highlightLift, highlightRange);
+    }
     rgb = rgb * (Yn / lumaNits);
 
     vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);

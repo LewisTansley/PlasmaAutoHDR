@@ -1,5 +1,6 @@
 #pragma once
 #include "autohdr_config.h"
+#include "tone_curve.h"
 #include <effect/offscreeneffect.h>
 #include <KSharedConfig>
 #include <QDateTime>
@@ -80,6 +81,10 @@ namespace KWin {
         QString findKnownAppKey(EffectWindow *window) const;
         bool isEligibleWindow(EffectWindow *window) const;
         void reloadActiveWindowSettings();
+        QString resolvedAppKeyForWindow(EffectWindow *window) const;
+        void computeToneCurveLut(const CalibrationSettings &settings);
+        void uploadToneCurveUniforms();
+        void warnMissingToneCurveUniformsOnce();
 
         QAction *m_toggleAction = nullptr;
         QAction *m_overlayAction = nullptr;
@@ -107,6 +112,15 @@ namespace KWin {
         int m_locHighlightLift = -1;
         int m_locHighlightRange = -1;
         int m_locColorVibrance = -1;
+        int m_locUseToneCurve = -1;
+        int m_locToneCurveInputSpan = -1;
+        int m_locToneCurveLut = -1;
+
+        float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
+        bool m_toneCurveLutDirty = true;
+        bool m_cachedUseToneCurve = false;
+        float m_cachedToneCurveInputSpan = 203.0f;
+        bool m_warnedMissingToneCurveUniforms = false;
 
         QString m_shaderPath;
         QDateTime m_shaderFragMtime;

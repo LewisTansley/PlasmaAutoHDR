@@ -1,9 +1,13 @@
 #pragma once
 
+#include "tone_curve.h"
+
 #include <KConfigGroup>
 #include <KSharedConfig>
+#include <QPointF>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <optional>
 
 namespace AutoHdr {
@@ -17,13 +21,22 @@ struct CalibrationSettings {
     float highlightExpansion = 1.0f;
     float highlightLift = 1.0f;
     float highlightRange = 0.0f;
+    float referenceNits = 203.0f;
+    QPointF sdrMaxPoint;
+    bool useToneCurve = false;
+    QVector<QPointF> toneCurvePoints;
 };
+
+constexpr float kReferenceNitsMin = 80.0f;
+constexpr float kReferenceNitsMax = 480.0f;
 
 constexpr float kHighlightExpansionMin = 0.5f;
 constexpr float kHighlightExpansionMax = 2.0f;
 constexpr float kHighlightLiftMin = 0.5f;
 constexpr float kHighlightLiftMax = 20.0f;
 constexpr float kHighlightRangeMax = 3.0f;
+
+float clampReferenceNits(float value);
 
 struct AppProfileMetadata {
     QString key;
@@ -76,5 +89,10 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
 
 float migrateMidPoint(float value);
 float effectiveMaxNits(const CalibrationSettings &settings, float referenceNits, float maxDisplayNits);
+
+ToneCurveEndpoints toneCurveEndpointsFor(const CalibrationSettings &settings, float hdrReferenceNits,
+                                         float maxDisplayNits);
+
+void seedToneCurveFromLegacy(CalibrationSettings &settings);
 
 } // namespace AutoHdr

@@ -23,6 +23,7 @@ kcoreaddons_add_plugin(kwin4_effect_autohdr
     SOURCES
         autohdr_effect.cpp
         autohdr_config.cpp
+        tone_curve.cpp
     INSTALL_NAMESPACE "kwin/effects/plugins"
 )
 
