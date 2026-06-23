@@ -34,8 +34,16 @@ float mapTone(float t, float paperWhiteNits, float peakNits, float highlightExp,
     float shoulderExp = 3.0 / max(highlightExp, 0.25) / max(highlightLiftVal, 0.25);
     float ePow = pow(excess, shoulderExp);
     float kPow = pow(knee, shoulderExp);
-    float s = ePow / (ePow + kPow);
-    return paperWhiteNits + headroom * s;
+    float sTarget = ePow / (ePow + kPow);
+    float highlightNits = paperWhiteNits + headroom * sTarget;
+
+    // Top-down: blend down from highlight nits toward paper white at reference.
+    // Higher expansion = shorter blend zone = full highlight nits reached sooner.
+    const float onsetBlend = 0.15;
+    float blendWidth = max(onsetBlend / max(highlightExp, 0.25), 1e-3);
+    float retain = smoothstep(1.0, 1.0 + blendWidth, t);
+
+    return mix(paperWhiteNits, highlightNits, retain);
 }
 
 vec3 applyColorControls(vec3 rgb, float sat, float vib)
