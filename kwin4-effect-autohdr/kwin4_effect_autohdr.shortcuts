@@ -1,0 +1,13 @@
+[Component]
+Name=kwin4_effect_autohdr
+FriendlyName=AutoHDR Per-Window Modifier
+
+[ToggleAutoHDR]
+Name=Toggle AutoHDR for Active Window
+text=Toggle AutoHDR for Active Window
+defaultShortcuts=Meta+Shift+H
+
+[ToggleAutoHDROverlay]
+Name=Open AutoHDR Calibration Engine
+text=Open AutoHDR Calibration Engine
+defaultShortcuts=Meta+Ctrl+H

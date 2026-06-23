@@ -1,0 +1,14 @@
+{
+    "KPlugin": {
+        "Description": "Configure AutoHDR global defaults and per-application profiles",
+        "Description[en_GB]": "Configure AutoHDR global defaults and per-application profiles",
+        "Icon": "video-display",
+        "Name": "AutoHDR",
+        "Name[en_GB]": "AutoHDR",
+        "ServiceTypes": [
+            "KCModule"
+        ]
+    },
+    "X-KDE-Keywords": "autohdr,hdr,calibration",
+    "X-KDE-ParentApp": "kwin"
+}

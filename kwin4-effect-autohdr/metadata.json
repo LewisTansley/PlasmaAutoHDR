@@ -1,0 +1,16 @@
+{
+    "KPackageStructure": "KWin/Effect",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Luu"
+            }
+        ],
+        "Category": "Appearance",
+        "Description": "AutoHDR spatial illumination matching for Plasma 6",
+        "EnabledByDefault": false,
+        "License": "GPL",
+        "Name": "AutoHDR"
+    },
+    "X-KDE-ConfigModule": "kwin4_effect_autohdr_config"
+}
