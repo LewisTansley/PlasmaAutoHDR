@@ -1,4 +1,5 @@
 #include "autohdr_config.h"
+#include "autohdr_qt_bridge.h"
 #include "tone_curve_presets.h"
 #include "tone_curve_user_presets.h"
 #include "tone_curve.h"
@@ -7,26 +8,6 @@
 #include <QRegularExpression>
 
 namespace AutoHdr {
-
-float clampReferenceNits(float value)
-{
-    return qBound(kReferenceNitsMin, value, kReferenceNitsMax);
-}
-
-float clampBlackPoint(float value)
-{
-    return qBound(-0.01f, value, 0.01f);
-}
-
-float clampVibrance(float value)
-{
-    return qBound(0.0f, value, 10.0f);
-}
-
-float clampGamutExpansion(float value)
-{
-    return qBound(0.0f, value, 20.0f);
-}
 
 namespace {
 
@@ -63,23 +44,9 @@ void seedToneCurveFromLegacy(CalibrationSettings &settings, float legacyMidPoint
 
 void remapToneCurveInputToSdrSpace(CalibrationSettings &settings, float referenceNits, float peakNits)
 {
-    const float ref = qMax(referenceNits, 1e-3f);
-    const float peak = qMax(peakNits, ref);
-
-    const auto remapInputX = [&](float x) {
-        if (x <= ref + 1e-3f) {
-            return x;
-        }
-        if (x >= peak * 0.99f) {
-            return ref;
-        }
-        return x * ref / peak;
-    };
-
-    settings.sdrMaxPoint.setX(remapInputX(static_cast<float>(settings.sdrMaxPoint.x())));
-    for (QPointF &point : settings.toneCurvePoints) {
-        point.setX(remapInputX(static_cast<float>(point.x())));
-    }
+    AutoHdrCore::CalibrationSettings core = toCore(settings);
+    AutoHdrCore::remapToneCurveInputToSdrSpace(core, referenceNits, peakNits);
+    settings = fromCore(core);
 }
 
 bool identifiersMatch(const AppProfileMetadata &metadata, const QString &desktopFile, const QString &resourceClass,
@@ -301,38 +268,12 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
 {
     Q_UNUSED(referenceNits)
 
-    if (settings.referenceNits <= 1e-6f) {
-        settings.referenceNits = 203.0f;
-    }
-    settings.referenceNits = clampReferenceNits(settings.referenceNits);
-
-    const float minPeak = settings.referenceNits + 1.0f;
-    settings.maxNits = qBound(minPeak, settings.maxNits, maxDisplayNits);
-    settings.vibrance = clampVibrance(settings.vibrance);
-    settings.blackPoint = clampBlackPoint(settings.blackPoint);
-    settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
-
-    const float peakNits = qMin(settings.maxNits, maxDisplayNits);
-    settings.maxNits = peakNits;
-
-    if (settings.toneCurvePreset != ToneCurvePreset::Custom) {
-        applyToneCurvePreset(settings, config);
-    }
-
-    const float curveReference = settings.referenceNits;
-
-    remapToneCurveInputToSdrSpace(settings, curveReference, peakNits);
-
-    if (settings.sdrMaxPoint.x() <= 1e-6f && settings.sdrMaxPoint.y() <= 1e-6f) {
-        settings.sdrMaxPoint = QPointF(curveReference, peakNits);
-    }
-
-    ToneCurveEndpoints endpoints;
-    endpoints.peakNits = peakNits;
-    endpoints.sdrMaxPoint = settings.sdrMaxPoint;
-    endpoints.visualReferenceNits = curveReference;
-    settings.toneCurvePoints = sanitizeIntermediatePoints(settings.toneCurvePoints, endpoints);
-    settings.sdrMaxPoint = sanitizeSdrMaxPoint(settings.sdrMaxPoint, endpoints, settings.toneCurvePoints);
+    AutoHdrCore::CalibrationSettings core = toCore(settings);
+    const std::vector<AutoHdrCore::UserToneCurvePreset> userPresets = loadCoreUserPresets(config);
+    const std::vector<AutoHdrCore::UserToneCurvePreset> *presetPtr =
+        userPresets.empty() ? nullptr : &userPresets;
+    AutoHdrCore::sanitizeCalibrationSettings(core, maxDisplayNits, presetPtr);
+    settings = fromCore(core);
 }
 
 ToneCurveEndpoints toneCurveEndpointsFor(const CalibrationSettings &settings, float hdrReferenceNits,
@@ -340,10 +281,12 @@ ToneCurveEndpoints toneCurveEndpointsFor(const CalibrationSettings &settings, fl
 {
     Q_UNUSED(hdrReferenceNits)
 
+    const AutoHdrCore::ToneCurveEndpoints core =
+        AutoHdrCore::toneCurveEndpointsFor(toCore(settings), maxDisplayNits);
     ToneCurveEndpoints endpoints;
-    endpoints.peakNits = qMin(settings.maxNits, maxDisplayNits);
-    endpoints.sdrMaxPoint = settings.sdrMaxPoint;
-    endpoints.visualReferenceNits = clampReferenceNits(settings.referenceNits);
+    endpoints.peakNits = core.peakNits;
+    endpoints.sdrMaxPoint = toQPointF(core.sdrMaxPoint);
+    endpoints.visualReferenceNits = core.visualReferenceNits;
     return endpoints;
 }
 

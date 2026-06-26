@@ -19,10 +19,13 @@ include(KDECMakeSettings)
 
 set(CMAKE_AUTOMOC ON)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../autohdr-core autohdr-core-build)
+
 kcoreaddons_add_plugin(kwin4_effect_autohdr
     SOURCES
         autohdr_effect.cpp
         autohdr_config.cpp
+        autohdr_qt_bridge.cpp
         tone_curve.cpp
         tone_curve_presets.cpp
         tone_curve_user_presets.cpp
@@ -39,7 +42,10 @@ target_link_libraries(kwin4_effect_autohdr
     KF6::ConfigCore
     KF6::GlobalAccel
     KF6::I18n
+    autohdr_core
 )
+
+target_include_directories(kwin4_effect_autohdr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../autohdr-core/include)
 
 install(FILES autohdr.frag
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr)

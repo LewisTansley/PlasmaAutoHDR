@@ -1,0 +1,20 @@
+{
+    "file_format_version": "1.1.0",
+    "layer": {
+        "name": "VK_LAYER_AUTOHDR",
+        "type": "GLOBAL",
+        "library_path": "libautohdr-vk.so",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "Plasma AutoHDR inverse tone mapping layer",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+        },
+        "disable_environment": {
+            "DISABLE_AUTOHDR_VK": "1"
+        },
+        "enable_environment": {
+            "ENABLE_AUTOHDR_VK": "1"
+        }
+    }
+}

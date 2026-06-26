@@ -1,0 +1,11 @@
+{
+  "name": "Decky AutoHDR",
+  "author": "PlasmaAutoHDR",
+  "flags": ["_root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["hdr", "gaming", "utility"],
+    "description": "Apply Plasma AutoHDR calibration presets in Steam Deck gaming mode via the autohdr-vk Vulkan layer.",
+    "image": "https://opengraph.githubassets.com/1/PlasmaAutoHDR/kwin4-effect-autohdr"
+  }
+}

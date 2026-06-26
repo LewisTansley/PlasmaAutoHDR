@@ -7,12 +7,16 @@ kcoreaddons_add_plugin(kwin4_effect_autohdr_config
         autohdr_effect_kcm.cpp
         tone_curve_editor.cpp
         ../autohdr_config.cpp
+        ../autohdr_qt_bridge.cpp
         ../tone_curve.cpp
         ../tone_curve_presets.cpp
         ../tone_curve_user_presets.cpp
 )
 
-target_include_directories(kwin4_effect_autohdr_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_include_directories(kwin4_effect_autohdr_config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../autohdr-core/include
+)
 
 target_link_libraries(kwin4_effect_autohdr_config
     PRIVATE
@@ -25,6 +29,7 @@ target_link_libraries(kwin4_effect_autohdr_config
     KF6::KCMUtils
     KF6::I18n
     KF6::CoreAddons
+    autohdr_core
 )
 
 target_compile_definitions(kwin4_effect_autohdr_config PRIVATE
