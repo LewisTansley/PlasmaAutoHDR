@@ -8,6 +8,8 @@ kcoreaddons_add_plugin(kwin4_effect_autohdr_config
         tone_curve_editor.cpp
         ../autohdr_config.cpp
         ../tone_curve.cpp
+        ../tone_curve_presets.cpp
+        ../tone_curve_user_presets.cpp
 )
 
 target_include_directories(kwin4_effect_autohdr_config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

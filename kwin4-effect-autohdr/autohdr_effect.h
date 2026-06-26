@@ -62,7 +62,7 @@ namespace KWin {
         void scheduleUnredirect(EffectWindow *window);
         void performUnredirect(EffectWindow *window);
         void runCalibrationDialog();
-        void finishCalibration(bool saved, bool usedPythonScript = false);
+        void finishCalibration(bool saved);
         void showTransientOnScreenMessage(const QString &message, const QString &iconName = QString());
         void repaintActiveWindows();
         void reloadHdrDisplayLimits();
@@ -94,7 +94,6 @@ namespace KWin {
         std::unique_ptr<GLShader> m_shader;
         KSharedConfigPtr m_config;
         QPointer<QProcess> m_kdialogProcess;
-        int m_calibrationStep = 0;
         bool m_dbusRegistered = false;
         bool m_autoActivateCalibrated = true;
         QString m_calibratingAppKey;
@@ -104,21 +103,14 @@ namespace KWin {
         float m_hdrReferenceNits = 100.0f;
         float m_hdrMaxDisplayNits = 1000.0f;
 
-        int m_locMaxNits = -1;
         int m_locGamutExpansion = -1;
         int m_locBlackPoint = -1;
-        int m_locMidPoint = -1;
-        int m_locHighlightExpansion = -1;
-        int m_locHighlightLift = -1;
-        int m_locHighlightRange = -1;
         int m_locColorVibrance = -1;
-        int m_locUseToneCurve = -1;
         int m_locToneCurveInputSpan = -1;
         int m_locToneCurveLut = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
         bool m_toneCurveLutDirty = true;
-        bool m_cachedUseToneCurve = false;
         float m_cachedToneCurveInputSpan = 203.0f;
         bool m_warnedMissingToneCurveUniforms = false;
 

@@ -5,15 +5,9 @@
 uniform sampler2D sampler;
 uniform vec4 modulation;
 
-uniform float maxNits;
 uniform float blackPoint;
-uniform float midPoint;
-uniform float highlightExpansion;
-uniform float highlightLift;
-uniform float highlightRange;
 uniform float colorVibrance;
 uniform float gamutExpansion;
-uniform float useToneCurve;
 uniform float toneCurveInputSpan;
 uniform float toneCurveLut[256];
 
@@ -21,33 +15,6 @@ in vec2 texcoord0;
 out vec4 fragColor;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-
-// BT.2408-inspired reference white system: SDR white at paper white, smooth shoulder to peak.
-float mapTone(float t, float paperWhiteNits, float peakNits, float highlightExp, float highlightLiftVal, float highlightRangeVal)
-{
-    t = max(t, 0.0);
-    if (t <= 1.0) {
-        return t * paperWhiteNits;
-    }
-    float headroom = max(peakNits - paperWhiteNits, 1e-3);
-    float excess = t - 1.0;
-    float knee = max(1.0, peakNits / paperWhiteNits - 1.0);
-    knee = max(knee / max(highlightExp, 0.25), 1e-3);
-    knee = knee * (1.0 + max(highlightRangeVal, 0.0));
-    float shoulderExp = 3.0 / max(highlightExp, 0.25) / max(highlightLiftVal, 0.25);
-    float ePow = pow(excess, shoulderExp);
-    float kPow = pow(knee, shoulderExp);
-    float sTarget = ePow / (ePow + kPow);
-    float highlightNits = paperWhiteNits + headroom * sTarget;
-
-    // Top-down: blend down from highlight nits toward paper white at reference.
-    // Higher expansion = shorter blend zone = full highlight nits reached sooner.
-    const float onsetBlend = 0.15;
-    float blendWidth = max(onsetBlend / max(highlightExp, 0.25), 1e-3);
-    float retain = smoothstep(1.0, 1.0 + blendWidth, t);
-
-    return mix(paperWhiteNits, highlightNits, retain);
-}
 
 float mapToneCurve(float inputNits, float inputSpan)
 {
@@ -154,7 +121,6 @@ void main()
 
     float ref = max(destinationReferenceLuminance, 1.0);
     float displayPeak = max(maxDestinationLuminance, ref);
-    float peakNits = min(max(maxNits, ref), displayPeak);
 
     // Align decoded source white to the KDE HDR calibration reference highlight.
     float sourceWhite = max(sourceTransferFunctionParams.x + sourceTransferFunctionParams.y, 1.0);
@@ -167,14 +133,9 @@ void main()
     float t = lumaNits / ref;
     t = max(t - blackPoint, 0.0) / max(1.0 - blackPoint, 1e-6);
 
-    float paperWhiteNits = clamp(midPoint, 80.0, 480.0);
-    float Yn;
-    if (useToneCurve > 0.5) {
-        float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : paperWhiteNits;
-        Yn = mapToneCurve(lumaNits, curveSpan);
-    } else {
-        Yn = mapTone(t, paperWhiteNits, peakNits, highlightExpansion, highlightLift, highlightRange);
-    }
+    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
+    float correctedNits = t * ref;
+    float Yn = mapToneCurve(correctedNits, curveSpan);
     rgb = rgb * (Yn / lumaNits);
 
     vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);
@@ -185,15 +146,6 @@ void main()
     }
 
     float outLuma = dot(rgb, LUMA);
-    if (highlightRange > 0.0 && outLuma > peakNits) {
-        float headroom = max(peakNits - paperWhiteNits, 1e-3);
-        float over = outLuma - peakNits;
-        float roll = max(headroom * highlightRange, 1e-3);
-        float compressed = roll * over / (over + roll);
-        outLuma = peakNits + compressed;
-        rgb *= outLuma / dot(rgb, LUMA);
-    }
-    outLuma = dot(rgb, LUMA);
     if (outLuma > displayPeak) {
         rgb *= displayPeak / outLuma;
     }

@@ -6,22 +6,32 @@
 #include "tone_curve_editor.h"
 
 #include "tone_curve.h"
+#include "tone_curve_presets.h"
+#include "tone_curve_user_presets.h"
 
-#include <QContextMenuEvent>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLineF>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPushButton>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 namespace {
 
 constexpr int kPlotSize = 280;
+constexpr int kPlotLabelTop = 18;
+constexpr int kPlotLabelBottom = 20;
 
 } // namespace
 
@@ -29,11 +39,35 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     : QWidget(parent)
 {
     setFocusPolicy(Qt::StrongFocus);
-    setMinimumSize(kPlotSize + 40, kPlotSize + 120);
+    setMinimumSize(kPlotSize + 180, kPlotSize + 56);
 
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
 
-    auto *inputsLayout = new QHBoxLayout();
+    auto *presetLayout = new QHBoxLayout();
+    m_presetCombo = new QComboBox(this);
+    m_savePresetBtn = new QPushButton(tr("Save preset…"), this);
+    m_updatePresetBtn = new QPushButton(tr("Update preset"), this);
+    m_deletePresetBtn = new QPushButton(tr("Delete preset"), this);
+    presetLayout->addWidget(new QLabel(tr("Curve preset:"), this));
+    presetLayout->addWidget(m_presetCombo, 1);
+    presetLayout->addWidget(m_savePresetBtn);
+    presetLayout->addWidget(m_updatePresetBtn);
+    presetLayout->addWidget(m_deletePresetBtn);
+    layout->addLayout(presetLayout);
+
+    auto *bodyLayout = new QHBoxLayout();
+    bodyLayout->setSpacing(16);
+    m_plotHost = new QWidget(this);
+    m_plotHost->setMinimumSize(kPlotSize, kPlotSize);
+    m_plotHost->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_plotHost->installEventFilter(this);
+    bodyLayout->addWidget(m_plotHost);
+
+    auto *controlsLayout = new QFormLayout();
+    controlsLayout->setContentsMargins(0, 8, 0, 0);
+    controlsLayout->setVerticalSpacing(8);
     m_peakNits = new QSpinBox(this);
     m_peakNits->setRange(1, 10000);
     m_peakNits->setSingleStep(10);
@@ -41,24 +75,27 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     m_referenceNits->setRange(static_cast<int>(AutoHdr::kReferenceNitsMin),
                               static_cast<int>(AutoHdr::kReferenceNitsMax));
     m_referenceNits->setSingleStep(1);
-    inputsLayout->addWidget(new QLabel(tr("Peak nits:"), this));
-    inputsLayout->addWidget(m_peakNits);
-    inputsLayout->addSpacing(12);
-    inputsLayout->addWidget(new QLabel(tr("Reference nits:"), this));
-    inputsLayout->addWidget(m_referenceNits);
-    inputsLayout->addStretch();
-    layout->addLayout(inputsLayout);
-
-    auto *readoutLayout = new QHBoxLayout();
+    m_blackPoint = new QDoubleSpinBox(this);
+    m_blackPoint->setRange(-0.01, 0.01);
+    m_blackPoint->setDecimals(4);
+    m_blackPoint->setSingleStep(0.0001);
+    m_vibrance = new QDoubleSpinBox(this);
+    m_vibrance->setRange(0.0, 10.0);
+    m_vibrance->setSingleStep(0.1);
+    m_gamutExpansion = new QDoubleSpinBox(this);
+    m_gamutExpansion->setRange(0.0, 20.0);
+    m_gamutExpansion->setSingleStep(0.1);
     m_inputLabel = new QLabel(tr("Input: —"), this);
     m_outputLabel = new QLabel(tr("Output: —"), this);
-    readoutLayout->addWidget(m_inputLabel);
-    readoutLayout->addSpacing(16);
-    readoutLayout->addWidget(m_outputLabel);
-    readoutLayout->addStretch();
-    layout->addLayout(readoutLayout);
-
-    layout->addStretch();
+    controlsLayout->addRow(tr("Peak nits:"), m_peakNits);
+    controlsLayout->addRow(tr("Reference nits:"), m_referenceNits);
+    controlsLayout->addRow(tr("Black point:"), m_blackPoint);
+    controlsLayout->addRow(tr("Vibrance:"), m_vibrance);
+    controlsLayout->addRow(tr("Gamut expansion:"), m_gamutExpansion);
+    controlsLayout->addRow(m_inputLabel);
+    controlsLayout->addRow(m_outputLabel);
+    bodyLayout->addLayout(controlsLayout, 1);
+    layout->addLayout(bodyLayout);
 
     connect(m_peakNits, qOverload<int>(&QSpinBox::valueChanged), this, [this]() {
         if (m_blockSignals) {
@@ -70,6 +107,7 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
             maybeSnapSdrMaxToPeak(previousPeak);
         }
         syncSpinRanges();
+        applyActivePreset();
         sanitizePoints();
         update();
         Q_EMIT settingsChanged();
@@ -84,11 +122,64 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
         m_referenceNitsValue =
             AutoHdr::clampReferenceNits(static_cast<float>(m_referenceNits->value()));
         enforcePeakFloor();
+        applyActivePreset();
         sanitizePoints();
         update();
         Q_EMIT settingsChanged();
     });
     connect(m_referenceNits, &QSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+    connect(m_blackPoint, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
+        if (m_blockSignals) {
+            return;
+        }
+        m_blackPointValue = AutoHdr::clampBlackPoint(static_cast<float>(m_blackPoint->value()));
+        Q_EMIT settingsChanged();
+    });
+    connect(m_blackPoint, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+    connect(m_vibrance, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
+        if (m_blockSignals) {
+            return;
+        }
+        m_vibranceValue = AutoHdr::clampVibrance(static_cast<float>(m_vibrance->value()));
+        Q_EMIT settingsChanged();
+    });
+    connect(m_vibrance, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+    connect(m_gamutExpansion, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
+        if (m_blockSignals) {
+            return;
+        }
+        m_gamutExpansionValue = AutoHdr::clampGamutExpansion(static_cast<float>(m_gamutExpansion->value()));
+        Q_EMIT settingsChanged();
+    });
+    connect(m_gamutExpansion, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+
+    connect(m_presetCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (m_blockSignals || index < 0) {
+            return;
+        }
+        const QString comboId = m_presetCombo->itemData(index).toString();
+        if (comboId == QStringLiteral("custom")) {
+            return;
+        }
+        setPresetFromComboId(comboId, true);
+        update();
+        Q_EMIT settingsChanged();
+    });
+    connect(m_presetCombo, &QComboBox::activated, this, [this]() { emitChanged(true); });
+    connect(m_savePresetBtn, &QPushButton::clicked, this, [this]() { saveUserPreset(); });
+    connect(m_updatePresetBtn, &QPushButton::clicked, this, [this]() { updateUserPreset(); });
+    connect(m_deletePresetBtn, &QPushButton::clicked, this, [this]() { deleteUserPreset(); });
+
+    rebuildPresetCombo();
+    updatePresetActionButtons();
+}
+
+void ToneCurveEditor::setConfig(const KSharedConfigPtr &config)
+{
+    m_config = config;
+    rebuildPresetCombo();
+    syncPresetCombo();
+    updatePresetActionButtons();
 }
 
 void ToneCurveEditor::setHdrLimits(int minPeakNits, int maxDisplayNits)
@@ -99,45 +190,99 @@ void ToneCurveEditor::setHdrLimits(int minPeakNits, int maxDisplayNits)
 }
 
 void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPointF &sdrMaxPoint,
-                                const QVector<QPointF> &intermediatePoints)
+                                const QVector<QPointF> &intermediatePoints, float blackPoint,
+                                AutoHdr::ToneCurvePreset preset, const QString &userPresetId, float vibrance,
+                                float gamutExpansion)
 {
     m_blockSignals = true;
     m_peakNitsValue = peakNits;
     m_referenceNitsValue = referenceNits;
     m_sdrMaxPoint = sdrMaxPoint;
     m_intermediatePoints = intermediatePoints;
+    m_blackPointValue = AutoHdr::clampBlackPoint(blackPoint);
+    m_vibranceValue = AutoHdr::clampVibrance(vibrance);
+    m_gamutExpansionValue = AutoHdr::clampGamutExpansion(gamutExpansion);
+    m_preset = preset;
+    m_userPresetId = userPresetId;
     syncSpinRanges();
     m_peakNits->setValue(qRound(peakNits));
     m_referenceNits->setValue(qRound(referenceNits));
+    m_blackPoint->setValue(m_blackPointValue);
+    m_vibrance->setValue(m_vibranceValue);
+    m_gamutExpansion->setValue(m_gamutExpansionValue);
     enforcePeakFloor();
     sanitizePoints();
+    rebuildPresetCombo();
+    syncPresetCombo();
+    updatePresetActionButtons();
     m_blockSignals = false;
     update();
 }
 
 void ToneCurveEditor::getValues(float &peakNits, float &referenceNits, QPointF &sdrMaxPoint,
-                                QVector<QPointF> &intermediatePoints)
+                                QVector<QPointF> &intermediatePoints, float &blackPoint,
+                                AutoHdr::ToneCurvePreset &preset, QString &userPresetId, float &vibrance,
+                                float &gamutExpansion)
 {
     flushSpinValuesFromUi();
     peakNits = m_peakNitsValue;
     referenceNits = m_referenceNitsValue;
     sdrMaxPoint = m_sdrMaxPoint;
     intermediatePoints = m_intermediatePoints;
+    m_blackPoint->interpretText();
+    m_blackPointValue = AutoHdr::clampBlackPoint(static_cast<float>(m_blackPoint->value()));
+    blackPoint = m_blackPointValue;
+    m_vibrance->interpretText();
+    m_vibranceValue = AutoHdr::clampVibrance(static_cast<float>(m_vibrance->value()));
+    vibrance = m_vibranceValue;
+    m_gamutExpansion->interpretText();
+    m_gamutExpansionValue = AutoHdr::clampGamutExpansion(static_cast<float>(m_gamutExpansion->value()));
+    gamutExpansion = m_gamutExpansionValue;
+    preset = m_preset;
+    userPresetId = m_userPresetId;
 }
 
-void ToneCurveEditor::seedFromLegacy(float midPointNits, float peakNits)
+AutoHdr::ToneCurvePreset ToneCurveEditor::toneCurvePreset() const
 {
-    setValues(peakNits, midPointNits, QPointF(midPointNits, peakNits), {});
+    return m_preset;
+}
+
+float ToneCurveEditor::blackPoint() const
+{
+    return m_blackPointValue;
+}
+
+void ToneCurveEditor::setBlackPoint(float blackPoint)
+{
+    m_blockSignals = true;
+    m_blackPointValue = AutoHdr::clampBlackPoint(blackPoint);
+    m_blackPoint->setValue(m_blackPointValue);
+    m_blockSignals = false;
+}
+
+QRectF ToneCurveEditor::plotHostRect() const
+{
+    if (!m_plotHost) {
+        return QRectF(0.0, 0.0, kPlotSize, kPlotSize);
+    }
+    const QPoint topLeft = m_plotHost->mapTo(this, QPoint(0, 0));
+    return QRectF(topLeft.x(), topLeft.y(), m_plotHost->width(), m_plotHost->height());
 }
 
 QRectF ToneCurveEditor::plotRect() const
 {
-    return QRectF(20.0, 60.0, kPlotSize, kPlotSize);
+    return plotHostRect().adjusted(0, kPlotLabelTop, 0, -kPlotLabelBottom);
 }
 
 QRectF ToneCurveEditor::interactiveRect() const
 {
     return plotRect().adjusted(-kHitPadding, -kHitPadding, kHitPadding, kHitPadding);
+}
+
+QPointF ToneCurveEditor::mapPlotEventPos(const QPointF &plotLocalPos) const
+{
+    const QRectF plot = plotRect();
+    return QPointF(plot.left() + plotLocalPos.x(), plot.top() + plotLocalPos.y() - kPlotLabelTop);
 }
 
 QPointF ToneCurveEditor::nitsToPixel(float inputNits, float outputNits) const
@@ -254,6 +399,205 @@ void ToneCurveEditor::sanitizePoints()
     m_sdrMaxPoint = AutoHdr::sanitizeSdrMaxPoint(m_sdrMaxPoint, ep, m_intermediatePoints);
 }
 
+AutoHdr::CalibrationSettings ToneCurveEditor::currentCalibrationSettings() const
+{
+    AutoHdr::CalibrationSettings settings;
+    settings.maxNits = m_peakNitsValue;
+    settings.referenceNits = m_referenceNitsValue;
+    settings.sdrMaxPoint = m_sdrMaxPoint;
+    settings.toneCurvePoints = m_intermediatePoints;
+    settings.toneCurvePreset = m_preset;
+    settings.toneCurveUserPresetId = m_userPresetId;
+    return settings;
+}
+
+void ToneCurveEditor::applyActivePreset()
+{
+    if (m_preset == AutoHdr::ToneCurvePreset::Custom) {
+        return;
+    }
+
+    AutoHdr::CalibrationSettings settings = currentCalibrationSettings();
+    AutoHdr::applyToneCurvePreset(settings, m_config);
+    m_sdrMaxPoint = settings.sdrMaxPoint;
+    m_intermediatePoints = settings.toneCurvePoints;
+}
+
+void ToneCurveEditor::markCustomPreset()
+{
+    if (m_preset == AutoHdr::ToneCurvePreset::Custom) {
+        return;
+    }
+    m_preset = AutoHdr::ToneCurvePreset::Custom;
+    m_userPresetId.clear();
+    syncPresetCombo();
+    updatePresetActionButtons();
+}
+
+QString ToneCurveEditor::currentComboId() const
+{
+    if (m_preset == AutoHdr::ToneCurvePreset::Custom) {
+        return QStringLiteral("custom");
+    }
+    if (m_preset == AutoHdr::ToneCurvePreset::User) {
+        return AutoHdr::userPresetComboId(m_userPresetId);
+    }
+    return AutoHdr::presetToString(m_preset);
+}
+
+void ToneCurveEditor::rebuildPresetCombo()
+{
+    if (!m_presetCombo) {
+        return;
+    }
+
+    m_blockSignals = true;
+    const QString previousId = currentComboId();
+    m_presetCombo->clear();
+
+    for (AutoHdr::ToneCurvePreset preset : AutoHdr::builtInToneCurvePresets()) {
+        m_presetCombo->addItem(AutoHdr::presetDisplayName(preset), AutoHdr::presetToString(preset));
+    }
+
+    if (m_config) {
+        const QVector<AutoHdr::UserToneCurvePreset> userPresets = AutoHdr::loadUserToneCurvePresets(m_config);
+        if (!userPresets.isEmpty()) {
+            m_presetCombo->insertSeparator(m_presetCombo->count());
+            for (const AutoHdr::UserToneCurvePreset &preset : userPresets) {
+                m_presetCombo->addItem(preset.displayName, AutoHdr::userPresetComboId(preset.id));
+            }
+        }
+    }
+
+    m_presetCombo->insertSeparator(m_presetCombo->count());
+    m_presetCombo->addItem(AutoHdr::presetDisplayName(AutoHdr::ToneCurvePreset::Custom), QStringLiteral("custom"));
+
+    const int index = m_presetCombo->findData(previousId);
+    if (index >= 0) {
+        m_presetCombo->setCurrentIndex(index);
+    }
+    m_blockSignals = false;
+}
+
+void ToneCurveEditor::syncPresetCombo()
+{
+    if (!m_presetCombo) {
+        return;
+    }
+    m_blockSignals = true;
+    const int index = m_presetCombo->findData(currentComboId());
+    if (index >= 0) {
+        m_presetCombo->setCurrentIndex(index);
+    }
+    m_blockSignals = false;
+}
+
+void ToneCurveEditor::setPresetFromComboId(const QString &comboId, bool applyCurve)
+{
+    if (comboId == QStringLiteral("custom")) {
+        return;
+    }
+
+    if (AutoHdr::isUserPresetComboId(comboId)) {
+        m_preset = AutoHdr::ToneCurvePreset::User;
+        m_userPresetId = AutoHdr::userPresetIdFromComboId(comboId);
+    } else {
+        m_preset = AutoHdr::presetFromString(comboId);
+        m_userPresetId.clear();
+    }
+
+    syncPresetCombo();
+    updatePresetActionButtons();
+    if (applyCurve) {
+        applyActivePreset();
+        sanitizePoints();
+    }
+}
+
+void ToneCurveEditor::updatePresetActionButtons()
+{
+    const bool hasConfig = static_cast<bool>(m_config);
+    const bool userActive = m_preset == AutoHdr::ToneCurvePreset::User && !m_userPresetId.isEmpty();
+    m_savePresetBtn->setEnabled(hasConfig);
+    m_updatePresetBtn->setEnabled(hasConfig && userActive);
+    m_deletePresetBtn->setEnabled(hasConfig && userActive);
+}
+
+void ToneCurveEditor::saveUserPreset()
+{
+    if (!m_config) {
+        return;
+    }
+
+    flushSpinValuesFromUi();
+    bool ok = false;
+    const QString name =
+        QInputDialog::getText(this, tr("Save Tone Curve Preset"), tr("Preset name:"), QLineEdit::Normal, QString(), &ok)
+            .trimmed();
+    if (!ok || name.isEmpty()) {
+        return;
+    }
+
+    AutoHdr::UserToneCurvePreset preset = AutoHdr::normalizeCurrentCurve(currentCalibrationSettings());
+    preset.id = AutoHdr::sanitizeUserPresetKey(name);
+    preset.displayName = name;
+    if (!AutoHdr::saveUserToneCurvePreset(m_config, preset)) {
+        return;
+    }
+
+    m_preset = AutoHdr::ToneCurvePreset::User;
+    m_userPresetId = preset.id;
+    rebuildPresetCombo();
+    syncPresetCombo();
+    updatePresetActionButtons();
+    update();
+    Q_EMIT settingsChanged();
+    Q_EMIT settingsCommitted();
+}
+
+void ToneCurveEditor::updateUserPreset()
+{
+    if (!m_config || m_preset != AutoHdr::ToneCurvePreset::User || m_userPresetId.isEmpty()) {
+        return;
+    }
+
+    flushSpinValuesFromUi();
+    AutoHdr::UserToneCurvePreset preset = AutoHdr::normalizeCurrentCurve(currentCalibrationSettings());
+    preset.id = m_userPresetId;
+    const std::optional<AutoHdr::UserToneCurvePreset> existing =
+        AutoHdr::loadUserToneCurvePreset(m_config, m_userPresetId);
+    preset.displayName = existing ? existing->displayName : m_userPresetId;
+    AutoHdr::saveUserToneCurvePreset(m_config, preset);
+    rebuildPresetCombo();
+    syncPresetCombo();
+    update();
+    Q_EMIT settingsChanged();
+    Q_EMIT settingsCommitted();
+}
+
+void ToneCurveEditor::deleteUserPreset()
+{
+    if (!m_config || m_preset != AutoHdr::ToneCurvePreset::User || m_userPresetId.isEmpty()) {
+        return;
+    }
+
+    const auto answer = QMessageBox::question(this, tr("Delete Tone Curve Preset"),
+                                              tr("Delete preset \"%1\"?").arg(m_userPresetId));
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    AutoHdr::deleteUserToneCurvePreset(m_config, m_userPresetId);
+    m_preset = AutoHdr::ToneCurvePreset::Custom;
+    m_userPresetId.clear();
+    rebuildPresetCombo();
+    syncPresetCombo();
+    updatePresetActionButtons();
+    update();
+    Q_EMIT settingsChanged();
+    Q_EMIT settingsCommitted();
+}
+
 void ToneCurveEditor::emitChanged(bool committed)
 {
     QObject *source = sender();
@@ -264,6 +608,7 @@ void ToneCurveEditor::emitChanged(bool committed)
         m_referenceNitsValue =
             AutoHdr::clampReferenceNits(static_cast<float>(m_referenceNits->value()));
         enforcePeakFloor();
+        applyActivePreset();
     } else if (source == m_peakNits) {
         m_peakNits->interpretText();
         const float previousPeak = m_peakNitsValue;
@@ -272,6 +617,10 @@ void ToneCurveEditor::emitChanged(bool committed)
             maybeSnapSdrMaxToPeak(previousPeak);
         }
         syncSpinRanges();
+        applyActivePreset();
+    } else if (source == m_blackPoint) {
+        m_blackPoint->interpretText();
+        m_blackPointValue = AutoHdr::clampBlackPoint(static_cast<float>(m_blackPoint->value()));
     } else {
         readSpinValuesFromUi();
     }
@@ -290,6 +639,7 @@ void ToneCurveEditor::removeIntermediateAt(int index)
     }
     m_intermediatePoints.removeAt(index);
     m_selectedIndex = -1;
+    markCustomPreset();
     emitChanged(true);
 }
 
@@ -310,15 +660,10 @@ void ToneCurveEditor::drawReferenceOverlay(QPainter &painter, const QRectF &plot
     }
 }
 
-void ToneCurveEditor::paintEvent(QPaintEvent *event)
+void ToneCurveEditor::drawPlot(QPainter &painter, const QRectF &plot) const
 {
-    Q_UNUSED(event)
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-
-    const QRectF plot = plotRect();
-
-    painter.fillRect(plot, QColor(32, 32, 32));
+    const QRectF host = plotHostRect();
+    painter.fillRect(host, QColor(32, 32, 32));
 
     painter.setPen(QColor(70, 70, 70));
     for (int i = 1; i < 4; ++i) {
@@ -331,8 +676,7 @@ void ToneCurveEditor::paintEvent(QPaintEvent *event)
     drawReferenceOverlay(painter, plot);
 
     painter.setPen(QColor(90, 90, 90));
-    painter.drawLine(nitsToPixel(0.0f, 0.0f),
-                     nitsToPixel(m_referenceNitsValue, m_referenceNitsValue));
+    painter.drawLine(nitsToPixel(0.0f, 0.0f), nitsToPixel(m_referenceNitsValue, m_referenceNitsValue));
 
     const QVector<QPointF> curve = fullCurve();
     if (curve.size() >= 2) {
@@ -368,17 +712,70 @@ void ToneCurveEditor::paintEvent(QPaintEvent *event)
                         kHandleRadius, kHandleRadius);
 
     painter.setPen(QColor(180, 180, 180));
-    painter.drawText(QRectF(plot.left(), plot.bottom() + 6, plot.width() / 2, 16), Qt::AlignLeft, tr("0 nits"));
-    painter.drawText(QRectF(plot.center().x(), plot.bottom() + 6, plot.width() / 2, 16), Qt::AlignRight,
-                     tr("%1 SDR nits").arg(qRound(m_referenceNitsValue)));
-    painter.drawText(QRectF(plot.left() - 18, plot.top() - 4, 60, 16), Qt::AlignLeft,
+    const qreal bottomLabelHeight = host.bottom() - plot.bottom();
+    painter.drawText(QRectF(plot.left(), plot.bottom(), plot.width() / 2.0, bottomLabelHeight), Qt::AlignLeft | Qt::AlignTop,
+                     tr("0 nits"));
+    painter.drawText(QRectF(plot.center().x(), plot.bottom(), plot.width() / 2.0, bottomLabelHeight),
+                     Qt::AlignRight | Qt::AlignTop, tr("%1 SDR nits").arg(qRound(m_referenceNitsValue)));
+    painter.drawText(QRectF(host.left(), host.top(), host.width() * 0.55, kPlotLabelTop), Qt::AlignLeft | Qt::AlignVCenter,
                      tr("%1 nits").arg(qRound(m_peakNitsValue)));
 }
 
-void ToneCurveEditor::mousePressEvent(QMouseEvent *event)
+void ToneCurveEditor::paintEvent(QPaintEvent *event)
 {
-    const int hit = hitTest(event->position());
-    if ((event->modifiers() & Qt::ControlModifier) && hit >= 0) {
+    Q_UNUSED(event)
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    drawPlot(painter, plotRect());
+}
+
+bool ToneCurveEditor::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched != m_plotHost) {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    switch (event->type()) {
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
+    case QEvent::MouseMove:
+    case QEvent::MouseButtonDblClick:
+    case QEvent::ContextMenu: {
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        const QPointF mappedPos = mapPlotEventPos(mouseEvent->position());
+
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+            handlePlotMousePress(mappedPos, mouseEvent->modifiers());
+            return true;
+        case QEvent::MouseMove:
+            handlePlotMouseMove(mappedPos);
+            return true;
+        case QEvent::MouseButtonRelease:
+            handlePlotMouseRelease();
+            return true;
+        case QEvent::MouseButtonDblClick:
+            handlePlotMouseDoubleClick(mappedPos);
+            return true;
+        case QEvent::ContextMenu:
+            handlePlotContextMenu(mappedPos, mouseEvent->globalPosition().toPoint());
+            return true;
+        default:
+            break;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return QWidget::eventFilter(watched, event);
+}
+
+void ToneCurveEditor::handlePlotMousePress(const QPointF &pos, Qt::KeyboardModifiers modifiers)
+{
+    const int hit = hitTest(pos);
+    if ((modifiers & Qt::ControlModifier) && hit >= 0) {
         removeIntermediateAt(hit);
         return;
     }
@@ -391,26 +788,27 @@ void ToneCurveEditor::mousePressEvent(QMouseEvent *event)
         m_dragIndex = hit;
         m_selectedIndex = hit;
         setFocus();
-    } else if (!plotRect().contains(event->position())) {
+    } else if (!plotRect().contains(pos)) {
         return;
     } else {
         return;
     }
 
-    updateReadout(static_cast<float>(pixelToNits(event->position()).x()));
+    updateReadout(static_cast<float>(pixelToNits(pos).x()));
 }
 
-void ToneCurveEditor::mouseMoveEvent(QMouseEvent *event)
+void ToneCurveEditor::handlePlotMouseMove(const QPointF &pos)
 {
     if (m_dragTarget == DragTarget::None) {
-        if (interactiveRect().contains(event->position())) {
-            updateReadout(static_cast<float>(pixelToNits(event->position()).x()));
+        if (interactiveRect().contains(pos)) {
+            updateReadout(static_cast<float>(pixelToNits(pos).x()));
         }
         return;
     }
 
-    const QPointF nits = pixelToNits(event->position());
+    markCustomPreset();
 
+    const QPointF nits = pixelToNits(pos);
     const float maxInputNits = m_referenceNitsValue;
 
     if (m_dragTarget == DragTarget::SdrMax) {
@@ -445,9 +843,8 @@ void ToneCurveEditor::mouseMoveEvent(QMouseEvent *event)
     Q_EMIT settingsChanged();
 }
 
-void ToneCurveEditor::mouseReleaseEvent(QMouseEvent *event)
+void ToneCurveEditor::handlePlotMouseRelease()
 {
-    Q_UNUSED(event)
     if (m_dragTarget != DragTarget::None) {
         m_dragTarget = DragTarget::None;
         m_dragIndex = -1;
@@ -455,23 +852,23 @@ void ToneCurveEditor::mouseReleaseEvent(QMouseEvent *event)
     }
 }
 
-void ToneCurveEditor::mouseDoubleClickEvent(QMouseEvent *event)
+void ToneCurveEditor::handlePlotMouseDoubleClick(const QPointF &pos)
 {
-    if (!plotRect().contains(event->position()) || hitTest(event->position()) != -1) {
+    if (!plotRect().contains(pos) || hitTest(pos) != -1) {
         return;
     }
 
-    const QPointF nits = pixelToNits(event->position());
+    const QPointF nits = pixelToNits(pos);
     float input = qBound(1.0f, static_cast<float>(nits.x()), static_cast<float>(m_sdrMaxPoint.x()) - 1.0f);
     float output = qBound(0.0f, static_cast<float>(nits.y()), m_peakNitsValue);
+    markCustomPreset();
     m_intermediatePoints.append(QPointF(input, output));
     sanitizePoints();
     emitChanged(true);
 }
 
-void ToneCurveEditor::contextMenuEvent(QContextMenuEvent *event)
+void ToneCurveEditor::handlePlotContextMenu(const QPointF &pos, const QPoint &globalPos)
 {
-    const QPointF pos = QPointF(event->pos());
     const int hit = hitTest(pos);
     if (hit < 0) {
         return;
@@ -479,7 +876,7 @@ void ToneCurveEditor::contextMenuEvent(QContextMenuEvent *event)
 
     QMenu menu(this);
     QAction *removeAction = menu.addAction(tr("Remove point"));
-    if (menu.exec(event->globalPos()) == removeAction) {
+    if (menu.exec(globalPos) == removeAction) {
         removeIntermediateAt(hit);
     }
 }

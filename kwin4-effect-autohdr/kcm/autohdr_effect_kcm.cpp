@@ -26,8 +26,6 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
-#include <QSpinBox>
-#include <QTabWidget>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -103,58 +101,8 @@ public:
         auto *defaultsGroup = new QGroupBox(i18n("Global Defaults"), widget());
         auto *defaultsOuterLayout = new QVBoxLayout(defaultsGroup);
 
-        m_modeTabs = new QTabWidget(defaultsGroup);
-        auto *simplePage = new QWidget(defaultsGroup);
-        auto *simpleLayout = new QFormLayout(simplePage);
-
-        m_maxNits = new QSpinBox(simplePage);
-        m_maxNits->setRange(1, 10000);
-        m_maxNits->setSingleStep(10);
-        simpleLayout->addRow(i18n("Peak brightness (nits):"), m_maxNits);
-
-        m_midPoint = new QSpinBox(simplePage);
-        m_midPoint->setRange(80, 480);
-        simpleLayout->addRow(i18n("Paper white (nits):"), m_midPoint);
-
-        m_blackPoint = new QDoubleSpinBox(simplePage);
-        m_blackPoint->setRange(-0.01, 0.01);
-        m_blackPoint->setDecimals(4);
-        m_blackPoint->setSingleStep(0.0001);
-        simpleLayout->addRow(i18n("Black point:"), m_blackPoint);
-
-        m_highlightExpansion = new QDoubleSpinBox(simplePage);
-        m_highlightExpansion->setRange(AutoHdr::kHighlightExpansionMin, AutoHdr::kHighlightExpansionMax);
-        m_highlightExpansion->setSingleStep(0.1);
-        simpleLayout->addRow(i18n("Highlight expansion:"), m_highlightExpansion);
-
-        m_highlightLift = new QDoubleSpinBox(simplePage);
-        m_highlightLift->setRange(AutoHdr::kHighlightLiftMin, AutoHdr::kHighlightLiftMax);
-        m_highlightLift->setSingleStep(0.1);
-        simpleLayout->addRow(i18n("Highlight lift:"), m_highlightLift);
-
-        m_highlightRange = new QDoubleSpinBox(simplePage);
-        m_highlightRange->setRange(0.0, AutoHdr::kHighlightRangeMax);
-        m_highlightRange->setSingleStep(0.1);
-        simpleLayout->addRow(i18n("Highlight range:"), m_highlightRange);
-
-        m_modeTabs->addTab(simplePage, i18n("Simple"));
-
         m_toneCurveEditor = new ToneCurveEditor(defaultsGroup);
-        m_modeTabs->addTab(m_toneCurveEditor, i18n("Tone Curve"));
-
-        defaultsOuterLayout->addWidget(m_modeTabs);
-
-        auto *sharedLayout = new QFormLayout();
-        m_vibrance = new QDoubleSpinBox(defaultsGroup);
-        m_vibrance->setRange(0.0, 10.0);
-        m_vibrance->setSingleStep(0.1);
-        sharedLayout->addRow(i18n("Vibrance:"), m_vibrance);
-
-        m_gamutExpansion = new QDoubleSpinBox(defaultsGroup);
-        m_gamutExpansion->setRange(0.0, 20.0);
-        m_gamutExpansion->setSingleStep(0.1);
-        sharedLayout->addRow(i18n("Gamut expansion:"), m_gamutExpansion);
-        defaultsOuterLayout->addLayout(sharedLayout);
+        defaultsOuterLayout->addWidget(m_toneCurveEditor);
 
         layout->addWidget(defaultsGroup);
 
@@ -176,23 +124,7 @@ public:
 
         layout->addWidget(appsGroup);
 
-        connect(m_maxNits, qOverload<int>(&QSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_midPoint, qOverload<int>(&QSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_blackPoint, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_vibrance, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_highlightExpansion, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_highlightLift, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_highlightRange, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_gamutExpansion, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
-        connect(m_modeTabs, &QTabWidget::currentChanged, this, [this](int index) {
-            if (index == 1 && !m_curveSeeded) {
-                m_toneCurveEditor->seedFromLegacy(static_cast<float>(m_midPoint->value()),
-                                                  static_cast<float>(m_maxNits->value()));
-                m_curveSeeded = true;
-            }
-            markAsChanged();
-        });
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
     }
 
@@ -201,25 +133,17 @@ public:
         KCModule::load();
 
         const HdrDisplayLimits limits = readHdrDisplayLimits();
-        m_maxNits->setRange(limits.referenceNits, limits.maxDisplayNits);
         m_toneCurveEditor->setHdrLimits(limits.referenceNits + 1, limits.maxDisplayNits);
 
         m_config->reparseConfiguration();
         const AutoHdr::CalibrationSettings globals =
             AutoHdr::loadGlobalSettings(m_config, static_cast<float>(limits.maxDisplayNits));
 
-        m_maxNits->setValue(qRound(globals.maxNits));
-        m_midPoint->setValue(qRound(globals.midPoint));
-        m_blackPoint->setValue(globals.blackPoint);
-        m_vibrance->setValue(globals.vibrance);
-        m_highlightExpansion->setValue(globals.highlightExpansion);
-        m_highlightLift->setValue(globals.highlightLift);
-        m_highlightRange->setValue(globals.highlightRange);
-        m_gamutExpansion->setValue(globals.gamutExpansion);
+        m_toneCurveEditor->setConfig(m_config);
+
         m_toneCurveEditor->setValues(globals.maxNits, globals.referenceNits, globals.sdrMaxPoint,
-                                     globals.toneCurvePoints);
-        m_modeTabs->setCurrentIndex(globals.useToneCurve ? 1 : 0);
-        m_curveSeeded = globals.useToneCurve;
+                                     globals.toneCurvePoints, globals.blackPoint, globals.toneCurvePreset,
+                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion);
 
         m_autoActivate->setChecked(AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated);
 
@@ -232,30 +156,30 @@ public:
 
         AutoHdr::CalibrationSettings globals =
             AutoHdr::loadGlobalSettings(m_config, static_cast<float>(limits.maxDisplayNits));
-        globals.maxNits = static_cast<float>(m_maxNits->value());
-        globals.midPoint = static_cast<float>(m_midPoint->value());
-        globals.blackPoint = static_cast<float>(m_blackPoint->value());
-        globals.vibrance = static_cast<float>(m_vibrance->value());
-        globals.highlightExpansion = static_cast<float>(m_highlightExpansion->value());
-        globals.highlightLift = static_cast<float>(m_highlightLift->value());
-        globals.highlightRange = static_cast<float>(m_highlightRange->value());
-        globals.gamutExpansion = static_cast<float>(m_gamutExpansion->value());
-        globals.useToneCurve = m_modeTabs->currentIndex() == 1;
 
         float peakNits = 0.0f;
         float referenceNits = 0.0f;
+        float blackPoint = 0.0f;
+        float vibrance = 0.0f;
+        float gamutExpansion = 1.5f;
         QPointF sdrMaxPoint;
         QVector<QPointF> intermediatePoints;
-        m_toneCurveEditor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints);
-        if (globals.useToneCurve) {
-            globals.maxNits = peakNits;
-            globals.referenceNits = referenceNits;
-            globals.sdrMaxPoint = sdrMaxPoint;
-            globals.toneCurvePoints = intermediatePoints;
-        }
+        AutoHdr::ToneCurvePreset toneCurvePreset = AutoHdr::ToneCurvePreset::Linear;
+        QString toneCurveUserPresetId;
+        m_toneCurveEditor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints, blackPoint,
+                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion);
+        globals.vibrance = vibrance;
+        globals.gamutExpansion = gamutExpansion;
+        globals.maxNits = peakNits;
+        globals.referenceNits = referenceNits;
+        globals.sdrMaxPoint = sdrMaxPoint;
+        globals.toneCurvePoints = intermediatePoints;
+        globals.blackPoint = blackPoint;
+        globals.toneCurvePreset = toneCurvePreset;
+        globals.toneCurveUserPresetId = toneCurveUserPresetId;
 
         AutoHdr::sanitizeCalibrationSettings(globals, static_cast<float>(limits.referenceNits),
-                                             static_cast<float>(limits.maxDisplayNits));
+                                             static_cast<float>(limits.maxDisplayNits), m_config);
         AutoHdr::saveGlobalSettings(m_config, globals);
 
         AutoHdr::GeneralSettings general;
@@ -335,18 +259,8 @@ private:
     }
 
     KSharedConfigPtr m_config;
-    QSpinBox *m_maxNits = nullptr;
-    QSpinBox *m_midPoint = nullptr;
-    QDoubleSpinBox *m_blackPoint = nullptr;
-    QDoubleSpinBox *m_vibrance = nullptr;
-    QDoubleSpinBox *m_highlightExpansion = nullptr;
-    QDoubleSpinBox *m_highlightLift = nullptr;
-    QDoubleSpinBox *m_highlightRange = nullptr;
-    QDoubleSpinBox *m_gamutExpansion = nullptr;
     QCheckBox *m_autoActivate = nullptr;
-    QTabWidget *m_modeTabs = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
-    bool m_curveSeeded = false;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;
     QSet<QString> m_pendingDeletes;

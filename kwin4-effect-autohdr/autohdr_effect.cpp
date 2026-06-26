@@ -14,7 +14,6 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QProcessEnvironment>
-#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
@@ -23,17 +22,6 @@
 #include <optional>
 
 namespace {
-
-enum class CalibrationDialogBackend {
-    Yad,
-    KDialog,
-    Zenity,
-};
-
-struct CalibrationDialogTool {
-    CalibrationDialogBackend backend;
-    QString executable;
-};
 
 struct HdrDisplayLimits {
     int referenceNits = 100;
@@ -70,11 +58,6 @@ HdrDisplayLimits readHdrDisplayLimits()
     return limits;
 }
 
-float clampPeakNits(float peakNits, const HdrDisplayLimits &limits)
-{
-    return qBound(static_cast<float>(limits.referenceNits), peakNits, static_cast<float>(limits.maxDisplayNits));
-}
-
 QString locateEffectDataFile(const QString &relativePath)
 {
     const QStringList candidates = QStandardPaths::locateAll(QStandardPaths::GenericDataLocation, relativePath);
@@ -84,288 +67,6 @@ QString locateEffectDataFile(const QString &relativePath)
         }
     }
     return candidates.isEmpty() ? QString() : candidates.constFirst();
-}
-
-std::optional<CalibrationDialogTool> locateCalibrationDialog()
-{
-    const QString yad = QStandardPaths::findExecutable(QStringLiteral("yad"));
-    if (!yad.isEmpty()) {
-        return CalibrationDialogTool{CalibrationDialogBackend::Yad, yad};
-    }
-
-    const QString kdialog = QStandardPaths::findExecutable(QStringLiteral("kdialog"));
-    if (!kdialog.isEmpty()) {
-        return CalibrationDialogTool{CalibrationDialogBackend::KDialog, kdialog};
-    }
-
-    const QString zenity = QStandardPaths::findExecutable(QStringLiteral("zenity"));
-    if (!zenity.isEmpty()) {
-        return CalibrationDialogTool{CalibrationDialogBackend::Zenity, zenity};
-    }
-
-    return std::nullopt;
-}
-
-QStringList calibrationDialogArgs(const CalibrationDialogTool &tool, int kdialogStep,
-                                  const AutoHdr::CalibrationSettings &settings, const HdrDisplayLimits &limits)
-{
-    const int peakNits = qRound(clampPeakNits(settings.maxNits, limits));
-
-    switch (tool.backend) {
-    case CalibrationDialogBackend::Yad:
-        return {QStringLiteral("--form"),
-                QStringLiteral("--title=AutoHDR Calibration"),
-                QStringLiteral("--width=420"),
-                QStringLiteral("--height=400"),
-                QStringLiteral("--separator=|"),
-                QStringLiteral("--button=Save:0"),
-                QStringLiteral("--button=Cancel:1"),
-                QStringLiteral("--field=Peak brightness (nits):NUM"),
-                QStringLiteral("%1!%2..%3!10").arg(peakNits).arg(limits.referenceNits).arg(limits.maxDisplayNits),
-                QStringLiteral("--field=Paper white (nits):NUM"),
-                QStringLiteral("%1!80..480!1").arg(qRound(settings.midPoint)),
-                QStringLiteral("--field=Black point:NUM"),
-                QStringLiteral("%1!-0.01..0.01!0.0001!4").arg(settings.blackPoint, 0, 'f', 4),
-                QStringLiteral("--field=Vibrance:NUM"),
-                QStringLiteral("%1!0.0..10.0!0.1!1").arg(settings.vibrance, 0, 'f', 1),
-                QStringLiteral("--field=Highlight expansion:NUM"),
-                QStringLiteral("%1!0.5..2.0!0.1!1").arg(settings.highlightExpansion, 0, 'f', 1),
-                QStringLiteral("--field=Highlight lift:NUM"),
-                QStringLiteral("%1!0.5..20.0!0.1!1").arg(settings.highlightLift, 0, 'f', 1),
-                QStringLiteral("--field=Highlight range:NUM"),
-                QStringLiteral("%1!0.0..3.0!0.1!1").arg(settings.highlightRange, 0, 'f', 1),
-                QStringLiteral("--field=Gamut expansion:NUM"),
-                QStringLiteral("%1!0.0..20.0!0.1!1").arg(settings.gamutExpansion, 0, 'f', 1)};
-    case CalibrationDialogBackend::Zenity:
-        return {QStringLiteral("--forms"),
-                QStringLiteral("--title=AutoHDR Calibration"),
-                QStringLiteral("--text=HDR calibration settings"),
-                QStringLiteral("--separator=|"),
-                QStringLiteral("--add-entry=Peak brightness (nits)"),
-                QStringLiteral("--entry-text=%1").arg(qRound(settings.maxNits)),
-                QStringLiteral("--add-entry=Paper white (nits)"),
-                QStringLiteral("--entry-text=%1").arg(qRound(settings.midPoint)),
-                QStringLiteral("--add-entry=Black point"),
-                QStringLiteral("--entry-text=%1").arg(settings.blackPoint, 0, 'f', 4),
-                QStringLiteral("--add-entry=Vibrance"),
-                QStringLiteral("--entry-text=%1").arg(settings.vibrance, 0, 'f', 1),
-                QStringLiteral("--add-entry=Highlight expansion"),
-                QStringLiteral("--entry-text=%1").arg(settings.highlightExpansion, 0, 'f', 1),
-                QStringLiteral("--add-entry=Highlight lift"),
-                QStringLiteral("--entry-text=%1").arg(settings.highlightLift, 0, 'f', 1),
-                QStringLiteral("--add-entry=Highlight range"),
-                QStringLiteral("--entry-text=%1").arg(settings.highlightRange, 0, 'f', 1),
-                QStringLiteral("--add-entry=Gamut expansion"),
-                QStringLiteral("--entry-text=%1").arg(settings.gamutExpansion, 0, 'f', 1)};
-    case CalibrationDialogBackend::KDialog:
-        switch (kdialogStep) {
-        case 0:
-            return {QStringLiteral("--2rangesbox"),
-                    QStringLiteral("AutoHDR — Calibration (1/4)"),
-                    QStringLiteral("0"),
-                    QStringLiteral("0"),
-                    QStringLiteral("Peak brightness (nits)"),
-                    QString::number(limits.referenceNits),
-                    QString::number(limits.maxDisplayNits),
-                    QString::number(peakNits),
-                    QStringLiteral("Paper white (nits)"),
-                    QStringLiteral("80"),
-                    QStringLiteral("480"),
-                    QString::number(qRound(settings.midPoint))};
-        default:
-            if (kdialogStep == 1) {
-                return {QStringLiteral("--2rangesbox"),
-                        QStringLiteral("AutoHDR — Calibration (2/4)"),
-                        QStringLiteral("0"),
-                        QStringLiteral("0"),
-                        QStringLiteral("Black point (x10000)"),
-                        QStringLiteral("-100"),
-                        QStringLiteral("100"),
-                        QString::number(qRound(settings.blackPoint * 10000.0f)),
-                        QStringLiteral("Highlight expansion (x10)"),
-                        QStringLiteral("5"),
-                        QStringLiteral("20"),
-                        QString::number(qRound(settings.highlightExpansion * 10.0f))};
-            }
-            if (kdialogStep == 2) {
-                return {QStringLiteral("--2rangesbox"),
-                        QStringLiteral("AutoHDR — Calibration (3/4)"),
-                        QStringLiteral("0"),
-                        QStringLiteral("0"),
-                        QStringLiteral("Vibrance (x10)"),
-                        QStringLiteral("0"),
-                        QStringLiteral("100"),
-                        QString::number(qRound(settings.vibrance * 10.0f)),
-                        QStringLiteral("Highlight lift (x10)"),
-                        QStringLiteral("5"),
-                        QStringLiteral("200"),
-                        QString::number(qRound(settings.highlightLift * 10.0f))};
-            }
-            return {QStringLiteral("--2rangesbox"),
-                    QStringLiteral("AutoHDR — Calibration (4/4)"),
-                    QStringLiteral("0"),
-                    QStringLiteral("0"),
-                    QStringLiteral("Gamut expansion (x10)"),
-                    QStringLiteral("0"),
-                    QStringLiteral("200"),
-                    QString::number(qRound(settings.gamutExpansion * 10.0f)),
-                    QStringLiteral("Highlight range (x10)"),
-                    QStringLiteral("0"),
-                    QStringLiteral("30"),
-                    QString::number(qRound(settings.highlightRange * 10.0f))};
-        }
-    }
-    return {};
-}
-
-bool parseCalibrationOutput(CalibrationDialogBackend backend, int kdialogStep, const QByteArray &output,
-                              AutoHdr::CalibrationSettings &settings)
-{
-    const QString text = QString::fromLocal8Bit(output).trimmed();
-    if (text.isEmpty()) {
-        return false;
-    }
-
-    switch (backend) {
-    case CalibrationDialogBackend::Yad: {
-        QStringList values;
-        for (const QString &part : text.split(QLatin1Char('|'))) {
-            if (!part.isEmpty()) {
-                values.append(part);
-            }
-        }
-        if (values.size() < 8) {
-            return false;
-        }
-
-        bool ok = false;
-        const int peak = values.at(0).toInt(&ok);
-        if (!ok || peak < 0) {
-            return false;
-        }
-        settings.maxNits = static_cast<float>(peak);
-        settings.midPoint = AutoHdr::migrateMidPoint(values.at(1).toFloat(&ok));
-        if (!ok) {
-            return false;
-        }
-        settings.blackPoint = values.at(2).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.vibrance = values.at(3).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightExpansion = values.at(4).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightLift = values.at(5).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightRange = values.at(6).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.gamutExpansion = values.at(7).toFloat(&ok);
-        return ok;
-    }
-    case CalibrationDialogBackend::Zenity: {
-        const QStringList values = text.split(QLatin1Char('|'));
-        if (values.size() < 8) {
-            return false;
-        }
-
-        bool ok = false;
-        settings.maxNits = values.at(0).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.midPoint = AutoHdr::migrateMidPoint(values.at(1).toFloat(&ok));
-        if (!ok) {
-            return false;
-        }
-        settings.blackPoint = values.at(2).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.vibrance = values.at(3).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightExpansion = values.at(4).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightLift = values.at(5).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.highlightRange = values.at(6).toFloat(&ok);
-        if (!ok) {
-            return false;
-        }
-        settings.gamutExpansion = values.at(7).toFloat(&ok);
-        return ok;
-    }
-    case CalibrationDialogBackend::KDialog:
-        if (kdialogStep == 0) {
-            const QStringList values = text.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-            if (values.size() != 2) {
-                return false;
-            }
-            bool ok = false;
-            settings.maxNits = values.at(0).toFloat(&ok);
-            if (!ok) {
-                return false;
-            }
-            settings.midPoint = AutoHdr::migrateMidPoint(values.at(1).toFloat(&ok));
-            return ok;
-        }
-        if (kdialogStep == 1) {
-            const QStringList values = text.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-            if (values.size() != 2) {
-                return false;
-            }
-            bool ok = false;
-            settings.blackPoint = values.at(0).toInt(&ok) / 10000.0f;
-            if (!ok) {
-                return false;
-            }
-            settings.highlightExpansion = values.at(1).toInt(&ok) / 10.0f;
-            return ok;
-        }
-        if (kdialogStep == 2) {
-            const QStringList values = text.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-            if (values.size() != 2) {
-                return false;
-            }
-            bool ok = false;
-            settings.vibrance = values.at(0).toInt(&ok) / 10.0f;
-            if (!ok) {
-                return false;
-            }
-            settings.highlightLift = values.at(1).toInt(&ok) / 10.0f;
-            return ok;
-        }
-        if (kdialogStep == 3) {
-            const QStringList values = text.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-            if (values.size() != 2) {
-                return false;
-            }
-            bool ok = false;
-            settings.gamutExpansion = values.at(0).toInt(&ok) / 10.0f;
-            if (!ok) {
-                return false;
-            }
-            settings.highlightRange = values.at(1).toInt(&ok) / 10.0f;
-            return ok;
-        }
-        return false;
-    }
-
-    return false;
 }
 
 } // namespace
@@ -616,7 +317,7 @@ namespace KWin {
             const std::optional<AutoHdr::AppProfile> profile = AutoHdr::loadAppProfile(m_config, appKey);
             if (profile) {
                 CalibrationSettings settings = profile->settings;
-                AutoHdr::sanitizeCalibrationSettings(settings, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+                AutoHdr::sanitizeCalibrationSettings(settings, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
                 return settings;
             }
         }
@@ -647,7 +348,7 @@ namespace KWin {
     void AutoHDREffect::sanitizeGlobalDefaults(bool persist)
     {
         reloadHdrDisplayLimits();
-        AutoHdr::sanitizeCalibrationSettings(m_globalDefaults, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+        AutoHdr::sanitizeCalibrationSettings(m_globalDefaults, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
         if (persist) {
             saveGlobalDefaults();
         }
@@ -680,7 +381,7 @@ namespace KWin {
                 const QString key = resolvedAppKeyForWindow(window);
                 settings = key.isEmpty() ? m_globalDefaults : settingsForAppKey(key);
             }
-            AutoHdr::sanitizeCalibrationSettings(settings, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+            AutoHdr::sanitizeCalibrationSettings(settings, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
             m_activeWindows.insert(window, settings);
         }
     }
@@ -690,14 +391,11 @@ namespace KWin {
         if (m_warnedMissingToneCurveUniforms) {
             return;
         }
-        if (m_locUseToneCurve < 0) {
-            qWarning() << "AutoHDR Effect: tone curve shader uniform 'useToneCurve' not found; tone curve mode disabled";
-        }
         if (m_locToneCurveLut < 0) {
-            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveLut' not found; tone curve mode disabled";
+            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveLut' not found";
         }
         if (m_locToneCurveInputSpan < 0) {
-            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveInputSpan' not found; tone curve mode disabled";
+            qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveInputSpan' not found";
         }
         m_warnedMissingToneCurveUniforms = true;
     }
@@ -705,13 +403,7 @@ namespace KWin {
     void AutoHDREffect::computeToneCurveLut(const CalibrationSettings &settings)
     {
         CalibrationSettings sanitized = settings;
-        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
-
-        m_cachedUseToneCurve = sanitized.useToneCurve;
-        if (!sanitized.useToneCurve) {
-            m_toneCurveLutDirty = true;
-            return;
-        }
+        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
 
         const AutoHdr::ToneCurveEndpoints endpoints =
             AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
@@ -731,13 +423,10 @@ namespace KWin {
         warnMissingToneCurveUniformsOnce();
 
         ShaderBinder binder(m_shader.get());
-        if (m_locUseToneCurve >= 0) {
-            m_shader->setUniform(m_locUseToneCurve, m_cachedUseToneCurve ? 1.0f : 0.0f);
-        }
-        if (m_cachedUseToneCurve && m_locToneCurveLut >= 0) {
+        if (m_locToneCurveLut >= 0) {
             glUniform1fv(m_locToneCurveLut, AutoHdr::kToneCurveLutSize, m_toneCurveLut);
         }
-        if (m_cachedUseToneCurve && m_locToneCurveInputSpan >= 0) {
+        if (m_locToneCurveInputSpan >= 0) {
             m_shader->setUniform(m_locToneCurveInputSpan, m_cachedToneCurveInputSpan);
         }
         m_toneCurveLutDirty = false;
@@ -750,15 +439,9 @@ namespace KWin {
         }
 
         ShaderBinder binder(m_shader.get());
-        m_locMaxNits = m_shader->uniformLocation("maxNits");
         m_locGamutExpansion = m_shader->uniformLocation("gamutExpansion");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
-        m_locMidPoint = m_shader->uniformLocation("midPoint");
-        m_locHighlightExpansion = m_shader->uniformLocation("highlightExpansion");
-        m_locHighlightLift = m_shader->uniformLocation("highlightLift");
-        m_locHighlightRange = m_shader->uniformLocation("highlightRange");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
-        m_locUseToneCurve = m_shader->uniformLocation("useToneCurve");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         warnMissingToneCurveUniformsOnce();
@@ -773,32 +456,14 @@ namespace KWin {
         }
 
         CalibrationSettings sanitized = settings;
-        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
 
         ShaderBinder binder(m_shader.get());
-        if (m_locMaxNits >= 0) {
-            const float peakUniform = sanitized.useToneCurve
-                ? qMin(sanitized.maxNits, m_hdrMaxDisplayNits)
-                : AutoHdr::effectiveMaxNits(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
-            m_shader->setUniform(m_locMaxNits, peakUniform);
-        }
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);
-        }
-        if (m_locMidPoint >= 0) {
-            m_shader->setUniform(m_locMidPoint, sanitized.midPoint);
-        }
-        if (m_locHighlightExpansion >= 0) {
-            m_shader->setUniform(m_locHighlightExpansion, sanitized.highlightExpansion);
-        }
-        if (m_locHighlightLift >= 0) {
-            m_shader->setUniform(m_locHighlightLift, sanitized.highlightLift);
-        }
-        if (m_locHighlightRange >= 0) {
-            m_shader->setUniform(m_locHighlightRange, sanitized.highlightRange);
         }
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
@@ -868,7 +533,7 @@ namespace KWin {
         m_pendingUnredirects.remove(window);
 
         CalibrationSettings sanitized = settings;
-        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+        AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
         m_activeWindows.insert(window, sanitized);
 
         updateUniforms(sanitized);
@@ -1091,17 +756,11 @@ namespace KWin {
         }
     }
 
-    void AutoHDREffect::finishCalibration(bool saved, bool usedPythonScript)
+    void AutoHDREffect::finishCalibration(bool saved)
     {
         m_kdialogProcess = nullptr;
-        m_calibrationStep = 0;
         m_calibratingWindow = nullptr;
         m_calibratingAppKey.clear();
-
-        if (!usedPythonScript && saved) {
-            // Fallback dialog path: save per-app profile when calibrating
-            // (handled inline in runCalibrationDialog for fallback)
-        }
 
         reloadSettings();
 
@@ -1114,118 +773,46 @@ namespace KWin {
     void AutoHDREffect::runCalibrationDialog()
     {
         const QString scriptPath = calibrationScriptPath();
-        if (!scriptPath.isEmpty()) {
-            auto *process = new QProcess(this);
-            m_kdialogProcess = process;
-
-            connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-                qWarning() << "AutoHDR Effect: calibration script error:" << error << process->errorString();
-                if (m_kdialogProcess == process) {
-                    finishCalibration(false, true);
-                    showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration dialog failed to open"),
-                                                 QStringLiteral("dialog-error"));
-                }
-                process->deleteLater();
-            });
-
-            connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus) {
-                if (m_kdialogProcess == process) {
-                    m_kdialogProcess = nullptr;
-                }
-
-                process->deleteLater();
-                effects->hideOnScreenMessage();
-
-                if (exitCode != 0) {
-                    qInfo() << "AutoHDR Effect: calibration dialog cancelled";
-                    finishCalibration(false, true);
-                    return;
-                }
-
-                finishCalibration(true, true);
-            });
-
-            qInfo() << "AutoHDR Effect: launching calibration script" << scriptPath;
-            process->setProcessEnvironment(calibrationProcessEnvironment());
-            process->start(scriptPath, QStringList());
-            return;
-        }
-
-        const std::optional<CalibrationDialogTool> dialogTool = locateCalibrationDialog();
-        if (!dialogTool) {
-            qWarning() << "AutoHDR Effect: no calibration dialog found (install yad, kdialog, or zenity)";
-            showTransientOnScreenMessage(QStringLiteral("Install yad, kdialog, or zenity for calibration"),
-                                         QStringLiteral("video-display"));
-            return;
-        }
-
-        reloadHdrDisplayLimits();
-        CalibrationSettings dialogSettings = settingsForWindow(m_calibratingWindow);
-        dialogSettings.maxNits = AutoHdr::effectiveMaxNits(dialogSettings, m_hdrReferenceNits, m_hdrMaxDisplayNits);
-        const HdrDisplayLimits limits = readHdrDisplayLimits();
-        const QStringList args = calibrationDialogArgs(*dialogTool, m_calibrationStep, dialogSettings, limits);
-        if (args.isEmpty()) {
-            finishCalibration(true, false);
+        if (scriptPath.isEmpty()) {
+            qWarning() << "AutoHDR Effect: calibration script not found";
+            showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration script not found"),
+                                         QStringLiteral("dialog-error"));
             return;
         }
 
         auto *process = new QProcess(this);
         m_kdialogProcess = process;
-        process->setProcessEnvironment(calibrationProcessEnvironment());
 
         connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-            qWarning() << "AutoHDR Effect: calibration dialog error:" << error << process->errorString();
+            qWarning() << "AutoHDR Effect: calibration script error:" << error << process->errorString();
             if (m_kdialogProcess == process) {
-                finishCalibration(m_calibrationStep > 0, false);
+                finishCalibration(false);
                 showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration dialog failed to open"),
                                              QStringLiteral("dialog-error"));
             }
             process->deleteLater();
         });
 
-        connect(process, &QProcess::finished, this, [this, process, dialogTool = *dialogTool](int exitCode, QProcess::ExitStatus) {
+        connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus) {
             if (m_kdialogProcess == process) {
                 m_kdialogProcess = nullptr;
             }
 
-            if (exitCode == 0) {
-                CalibrationSettings parsed = settingsForWindow(m_calibratingWindow);
-                if (parseCalibrationOutput(dialogTool.backend, m_calibrationStep, process->readAllStandardOutput(),
-                                           parsed)) {
-                    AutoHdr::sanitizeCalibrationSettings(parsed, m_hdrReferenceNits, m_hdrMaxDisplayNits);
-                    if (!m_calibratingAppKey.isEmpty() && m_calibratingWindow) {
-                        AutoHdr::AppProfile profile;
-                        profile.metadata.key = m_calibratingAppKey;
-                        const WindowIdentifiers ids = identifiersForWindow(m_calibratingWindow);
-                        profile.metadata.displayName = ids.displayName;
-                        profile.metadata.windowClass = ids.windowClass;
-                        profile.metadata.resourceClass = ids.resourceClass;
-                        profile.metadata.desktopFile = ids.desktopFile;
-                        profile.metadata.autoActivate = true;
-                        profile.settings = parsed;
-                        AutoHdr::saveAppProfile(m_config, profile);
-                        activateWindow(m_calibratingWindow, parsed);
-                    }
-                }
-            }
-
             process->deleteLater();
+            effects->hideOnScreenMessage();
 
             if (exitCode != 0) {
-                finishCalibration(false, false);
+                qInfo() << "AutoHDR Effect: calibration dialog cancelled";
+                finishCalibration(false);
                 return;
             }
 
-            if (dialogTool.backend == CalibrationDialogBackend::KDialog && m_calibrationStep < 3) {
-                ++m_calibrationStep;
-                runCalibrationDialog();
-                return;
-            }
-
-            finishCalibration(true, false);
+            finishCalibration(true);
         });
 
-        process->start(dialogTool->executable, args);
+        qInfo() << "AutoHDR Effect: launching calibration script" << scriptPath;
+        process->setProcessEnvironment(calibrationProcessEnvironment());
+        process->start(scriptPath, QStringList());
     }
 
     void AutoHDREffect::toggleOverlay()
@@ -1235,7 +822,6 @@ namespace KWin {
             return;
         }
         m_kdialogProcess = nullptr;
-        m_calibrationStep = 0;
 
         EffectWindow *active = effects->activeWindow();
         if (!active) {

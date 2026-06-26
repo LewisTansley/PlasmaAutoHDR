@@ -10,25 +10,21 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
-
-SLIDER_STEPS = 10_000
 
 CONFIG_KEYS = (
     "MaxNits",
     "GamutExpansion",
     "BlackPoint",
     "Vibrance",
-    "MidPoint",
-    "HighlightExpansion",
-    "HighlightLift",
-    "HighlightRange",
     "ReferenceNits",
     "SdrMaxPoint",
-    "UseToneCurve",
     "ToneCurvePoints",
+    "ToneCurvePreset",
+    "ToneCurveUserPresetId",
 )
 
 METADATA_KEYS = (
@@ -44,28 +40,21 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "GamutExpansion": 1.5,
     "BlackPoint": 0.0,
     "Vibrance": 0.0,
-    "MidPoint": 203.0,
-    "HighlightExpansion": 1.0,
-    "HighlightLift": 1.0,
-    "HighlightRange": 0.0,
     "ReferenceNits": 203.0,
     "SdrMaxPoint": "",
-    "UseToneCurve": False,
     "ToneCurvePoints": "",
+    "ToneCurvePreset": "linear",
+    "ToneCurveUserPresetId": "",
 }
 
 REFERENCE_NITS_MIN = 80.0
 REFERENCE_NITS_MAX = 480.0
 TONE_CURVE_LUT_SIZE = 256
 PLOT_SIZE = 280
+PLOT_LABEL_TOP = 18
+PLOT_LABEL_BOTTOM = 20
 HANDLE_RADIUS = 6
 HIT_PADDING = 8
-
-HIGHLIGHT_EXPANSION_MIN = 0.5
-HIGHLIGHT_EXPANSION_MAX = 2.0
-HIGHLIGHT_LIFT_MIN = 0.5
-HIGHLIGHT_LIFT_MAX = 20.0
-HIGHLIGHT_RANGE_MAX = 3.0
 
 DBUS_SERVICE = "org.kde.kwin.effect.autohdr"
 DBUS_INTERFACE = "org.kde.kwin.effect.autohdr"
@@ -75,6 +64,8 @@ APP_GROUP_PREFIX = "App "
 GROUP_GENERAL = "General"
 GROUP_SETTINGS = "Settings"
 GROUP_APPLICATIONS = "Applications"
+GROUP_USER_PRESETS = "UserPresets"
+PRESET_GROUP_PREFIX = "Preset "
 
 
 def canonical_key(key: str) -> str | None:
@@ -110,9 +101,11 @@ def read_section_entries(parser: ConfigParser, section: str) -> dict[str, str]:
 def parse_config_value(key: str, value: str, default: object) -> object:
     if key == "AutoActivate":
         return value.strip().lower() in {"true", "1", "yes", "on"}
-    if key == "UseToneCurve":
-        return value.strip().lower() in {"true", "1", "yes", "on"}
     if key == "ToneCurvePoints":
+        return value.strip()
+    if key == "ToneCurvePreset":
+        return value.strip()
+    if key == "ToneCurveUserPresetId":
         return value.strip()
     if key == "SdrMaxPoint":
         return value.strip()
@@ -124,15 +117,17 @@ def parse_config_value(key: str, value: str, default: object) -> object:
 
 
 def format_config_value(key: str, value: object) -> str:
-    if key == "MidPoint":
-        return str(int(round(float(value))))
     if key in {"ReferenceNits"}:
         return str(int(round(float(value))))
     if key == "SdrMaxPoint":
         return str(value)
-    if key in {"AutoActivate", "UseToneCurve"} or isinstance(value, bool):
+    if key == "AutoActivate" or isinstance(value, bool):
         return "true" if value else "false"
     if key == "ToneCurvePoints":
+        return str(value)
+    if key == "ToneCurvePreset":
+        return str(value)
+    if key == "ToneCurveUserPresetId":
         return str(value)
     if isinstance(value, int):
         return str(int(value))
@@ -289,25 +284,19 @@ def remap_tone_curve_input_to_sdr_space(
 
 def sanitize_settings(settings: dict[str, object], reference: int, max_nits: int) -> dict[str, object]:
     result = settings.copy()
-    use_tone = bool(result.get("UseToneCurve", False))
-    ref = clamp_reference_nits(float(result.get("ReferenceNits", result["MidPoint"])))
+    ref = clamp_reference_nits(float(result.get("ReferenceNits", 203.0)))
     result["ReferenceNits"] = ref
-    if use_tone:
-        result["MaxNits"] = clamp_curve_peak(float(result["MaxNits"]), ref, max_nits)
-    elif float(result["MaxNits"]) <= reference * 1.01:
-        result["MaxNits"] = float(max_nits)
-    else:
-        result["MaxNits"] = min(float(result["MaxNits"]), float(max_nits))
-    result["MidPoint"] = migrate_midpoint(float(result["MidPoint"]))
+    result["MaxNits"] = clamp_curve_peak(float(result["MaxNits"]), ref, max_nits)
     if float(result["GamutExpansion"]) < 0.0 or float(result["GamutExpansion"]) > 20.0:
         result["GamutExpansion"] = 1.5
     result["Vibrance"] = clamp_vibrance(float(result["Vibrance"]))
-    result["HighlightExpansion"] = clamp_highlight_expansion(float(result["HighlightExpansion"]))
-    result["HighlightLift"] = clamp_highlight_lift(float(result["HighlightLift"]))
-    result["HighlightRange"] = clamp_highlight_range(float(result.get("HighlightRange", 0.0)))
     result["GamutExpansion"] = clamp_gamut_expansion(float(result["GamutExpansion"]))
     result["BlackPoint"] = clamp_black(float(result["BlackPoint"]))
     peak = float(result["MaxNits"])
+    preset = preset_from_string(str(result.get("ToneCurvePreset", "custom")))
+    result["ToneCurvePreset"] = preset_to_string(preset)
+    if preset != PRESET_CUSTOM:
+        apply_tone_curve_preset(result, config_path())
     sdr_x, sdr_y = parse_sdr_max_point(str(result.get("SdrMaxPoint", "")), (peak, peak))
     if sdr_x <= 1e-6 and sdr_y <= 1e-6:
         sdr_x, sdr_y = ref, peak
@@ -316,9 +305,40 @@ def sanitize_settings(settings: dict[str, object], reference: int, max_nits: int
     intermediates = sanitize_intermediate_points(intermediates, sdr_x, peak, ref)
     sdr_x, sdr_y = sanitize_sdr_max_point(sdr_x, sdr_y, ref, peak, intermediates)
     result["SdrMaxPoint"] = format_sdr_max_point((sdr_x, sdr_y))
-    result["UseToneCurve"] = bool(result.get("UseToneCurve", False))
     result["ToneCurvePoints"] = format_tone_curve_points(intermediates)
     return result
+
+
+def migrate_legacy_settings(settings: dict[str, object], entries: dict[str, str]) -> None:
+    use_tone_curve = entries.get("UseToneCurve", "false").strip().lower() in {"true", "1", "yes", "on"}
+    legacy_mid = migrate_midpoint(float(entries.get("MidPoint", settings.get("ReferenceNits", 203.0))))
+    has_reference = "ReferenceNits" in entries
+    has_sdr = "SdrMaxPoint" in entries or "MaxEndpointOutput" in entries
+
+    if not use_tone_curve or not has_reference or not has_sdr:
+        peak = float(settings["MaxNits"])
+        ref = clamp_reference_nits(legacy_mid)
+        settings["ReferenceNits"] = ref
+        settings["SdrMaxPoint"] = format_sdr_max_point((ref, peak))
+        settings["ToneCurvePoints"] = ""
+        settings["ToneCurvePreset"] = PRESET_LINEAR
+
+
+def apply_tone_curve_preset_after_read(settings: dict[str, object], entries: dict[str, str]) -> None:
+    use_tone_curve = entries.get("UseToneCurve", "false").strip().lower() in {"true", "1", "yes", "on"}
+    has_reference = "ReferenceNits" in entries
+    has_sdr = "SdrMaxPoint" in entries or "MaxEndpointOutput" in entries
+    if not use_tone_curve or not has_reference or not has_sdr:
+        return
+
+    if "ToneCurvePreset" in entries:
+        preset = preset_from_string(entries["ToneCurvePreset"])
+        settings["ToneCurvePreset"] = preset_to_string(preset)
+        settings["ToneCurveUserPresetId"] = entries.get("ToneCurveUserPresetId", "").strip()
+        if preset != PRESET_CUSTOM:
+            apply_tone_curve_preset(settings, config_path())
+    else:
+        settings["ToneCurvePreset"] = PRESET_CUSTOM
 
 
 def read_global_settings(reference: int, max_nits: int) -> dict[str, object]:
@@ -336,6 +356,8 @@ def read_global_settings(reference: int, max_nits: int) -> dict[str, object]:
         settings[canon] = parse_config_value(canon, value, default)
 
     settings["SdrMaxPoint"] = migrate_sdr_max_point(entries, float(settings["MaxNits"]))
+    migrate_legacy_settings(settings, entries)
+    apply_tone_curve_preset_after_read(settings, entries)
 
     return sanitize_settings(settings, reference, max_nits)
 
@@ -358,6 +380,8 @@ def read_app_settings(app_key: str, reference: int, max_nits: int) -> dict[str, 
         settings[canon] = parse_config_value(canon, value, default)
 
     settings["SdrMaxPoint"] = migrate_sdr_max_point(entries, float(settings["MaxNits"]))
+    migrate_legacy_settings(settings, entries)
+    apply_tone_curve_preset_after_read(settings, entries)
 
     return sanitize_settings(settings, reference, max_nits)
 
@@ -431,10 +455,6 @@ def delete_app_profile(app_key: str) -> None:
     write_config_file_atomic(path, parser)
 
 
-def clamp_peak(value: float, reference: int, max_nits: int) -> float:
-    return max(float(reference), min(float(max_nits), value))
-
-
 def clamp_curve_peak(value: float, reference_nits: float, max_nits: int) -> float:
     return max(clamp_reference_nits(reference_nits) + 1.0, min(float(max_nits), value))
 
@@ -443,28 +463,12 @@ def snap_sdr_max_point_for_save(sdr_x: float, sdr_y: float, peak_nits: float) ->
     return sdr_x, min(sdr_y, peak_nits)
 
 
-def clamp_paper_white(value: float) -> float:
-    return max(80.0, min(480.0, value))
-
-
 def clamp_black(value: float) -> float:
     return max(-0.01, min(0.01, value))
 
 
 def clamp_vibrance(value: float) -> float:
     return max(0.0, min(10.0, value))
-
-
-def clamp_highlight_expansion(value: float) -> float:
-    return max(HIGHLIGHT_EXPANSION_MIN, min(HIGHLIGHT_EXPANSION_MAX, value))
-
-
-def clamp_highlight_lift(value: float) -> float:
-    return max(HIGHLIGHT_LIFT_MIN, min(HIGHLIGHT_LIFT_MAX, value))
-
-
-def clamp_highlight_range(value: float) -> float:
-    return max(0.0, min(HIGHLIGHT_RANGE_MAX, value))
 
 
 def clamp_gamut_expansion(value: float) -> float:
@@ -709,42 +713,313 @@ def build_tone_curve_lut(
     return lut
 
 
-@dataclass(frozen=True)
-class SettingSpec:
-    key: str
-    label: str
-    vmin: float
-    vmax: float
-    step: float
-    integer: bool = False
-    decimals: int = 1
+PRESET_CUSTOM = "custom"
+PRESET_USER = "user"
+PRESET_LINEAR = "linear"
+PRESET_SCURVE = "scurve"
+PRESET_SCURVE_BOOSTED = "scurve_boosted"
+PRESET_SCURVE_LIFTED = "scurve_lifted"
+PRESET_EXPONENTIAL = "exponential"
+
+BUILT_IN_PRESETS = (
+    PRESET_LINEAR,
+    PRESET_SCURVE,
+    PRESET_SCURVE_BOOSTED,
+    PRESET_SCURVE_LIFTED,
+    PRESET_EXPONENTIAL,
+)
+
+PRESET_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)
+K_SCURVE_BOOST_STRENGTH = 0.65
+K_SCURVE_LIFT_AMOUNT = 0.12
+K_EXPONENTIAL_RATE = 2.4
 
 
-def calibration_specs(reference: int, max_nits: int) -> list[SettingSpec]:
-    return [
-        SettingSpec("MaxNits", "Peak brightness (nits)", float(reference), float(max_nits), 10.0, True),
-        SettingSpec("MidPoint", "Paper white (nits)", 80.0, 480.0, 1.0, True),
-        SettingSpec("BlackPoint", "Black point", -0.01, 0.01, 0.0001, False, 4),
-        SettingSpec("Vibrance", "Vibrance", 0.0, 10.0, 0.1),
-        SettingSpec("HighlightExpansion", "Highlight expansion", HIGHLIGHT_EXPANSION_MIN, HIGHLIGHT_EXPANSION_MAX, 0.1),
-        SettingSpec("HighlightLift", "Highlight lift", HIGHLIGHT_LIFT_MIN, HIGHLIGHT_LIFT_MAX, 0.1),
-        SettingSpec("HighlightRange", "Highlight range", 0.0, HIGHLIGHT_RANGE_MAX, 0.1),
-        SettingSpec("GamutExpansion", "Gamut expansion", 0.0, 20.0, 0.1),
-    ]
+def preset_to_string(preset: str) -> str:
+    normalized = preset.strip().lower()
+    if normalized in {*BUILT_IN_PRESETS, PRESET_CUSTOM, PRESET_USER}:
+        return normalized
+    return PRESET_CUSTOM
 
 
-def value_to_normalized(value: float, vmin: float, vmax: float) -> float:
-    if vmax <= vmin:
-        return 0.0
-    return max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
+def preset_from_string(encoded: str) -> str:
+    return preset_to_string(encoded)
 
 
-def normalized_to_value(t: float, vmin: float, vmax: float, step: float) -> float:
+def preset_display_name(preset: str) -> str:
+    names = {
+        PRESET_LINEAR: "Linear",
+        PRESET_SCURVE: "S-Curve",
+        PRESET_SCURVE_BOOSTED: "S-Curve Boosted",
+        PRESET_SCURVE_LIFTED: "S-Curve Lifted",
+        PRESET_EXPONENTIAL: "Exponential",
+        PRESET_USER: "User Preset",
+        PRESET_CUSTOM: "Custom",
+    }
+    return names.get(preset_to_string(preset), "Custom")
+
+
+def _smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
-    raw = vmin + t * (vmax - vmin)
-    if step > 0.0:
-        raw = vmin + round((raw - vmin) / step) * step
-    return max(vmin, min(vmax, raw))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _preset_mapping(preset: str, t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    preset = preset_to_string(preset)
+    if preset == PRESET_LINEAR:
+        return t
+    if preset == PRESET_SCURVE:
+        return _smoothstep(t)
+    if preset == PRESET_SCURVE_BOOSTED:
+        s = _smoothstep(t)
+        return t + K_SCURVE_BOOST_STRENGTH * (s - t)
+    if preset == PRESET_SCURVE_LIFTED:
+        return K_SCURVE_LIFT_AMOUNT + (1.0 - K_SCURVE_LIFT_AMOUNT) * _smoothstep(t)
+    if preset == PRESET_EXPONENTIAL:
+        import math
+
+        k = K_EXPONENTIAL_RATE
+        denom = math.exp(k) - 1.0
+        if abs(denom) < 1e-6:
+            return t
+        return (math.exp(k * t) - 1.0) / denom
+    return t
+
+
+def generate_preset_intermediate_points(
+    preset: str, reference_nits: float, peak_nits: float
+) -> list[tuple[float, float]]:
+    preset = preset_to_string(preset)
+    if preset in {PRESET_CUSTOM, PRESET_LINEAR, PRESET_USER}:
+        return []
+
+    ref = max(reference_nits, 1e-3)
+    peak = max(peak_nits, ref)
+    points = [
+        (t * ref, _preset_mapping(preset, t) * peak)
+        for t in PRESET_SAMPLE_FRACTIONS
+    ]
+    return sanitize_intermediate_points(points, ref, peak, ref)
+
+
+def apply_tone_curve_preset(settings: dict[str, object], cfg_path: Path | None = None) -> None:
+    preset = preset_from_string(str(settings.get("ToneCurvePreset", PRESET_CUSTOM)))
+    if preset == PRESET_CUSTOM:
+        return
+    if preset == PRESET_USER:
+        preset_id = str(settings.get("ToneCurveUserPresetId", "")).strip()
+        if not preset_id:
+            return
+        user_preset = load_user_tone_curve_preset(cfg_path or config_path(), preset_id)
+        if user_preset is None:
+            return
+        apply_user_tone_curve_preset(settings, user_preset)
+        return
+    ref = float(settings["ReferenceNits"])
+    peak = float(settings["MaxNits"])
+    settings["SdrMaxPoint"] = format_sdr_max_point((ref, peak))
+    settings["ToneCurvePoints"] = format_tone_curve_points(
+        generate_preset_intermediate_points(preset, ref, peak)
+    )
+
+
+def sanitize_user_preset_key(raw: str) -> str:
+    key = re.sub(r"[^a-z0-9._-]+", "_", raw.strip().lower())
+    key = re.sub(r"_+", "_", key).strip("_")
+    return key or "preset"
+
+
+def user_preset_group_name(preset_id: str) -> str:
+    return f"{PRESET_GROUP_PREFIX}{preset_id}"
+
+
+def user_preset_combo_id(preset_id: str) -> str:
+    return f"user:{preset_id}"
+
+
+def is_user_preset_combo_id(combo_id: str) -> bool:
+    return combo_id.startswith("user:")
+
+
+def user_preset_id_from_combo_id(combo_id: str) -> str:
+    return combo_id[5:] if is_user_preset_combo_id(combo_id) else ""
+
+
+def format_normalized_points(points: list[tuple[float, float]]) -> str:
+    return ",".join(f"{x:.4f}:{y:.4f}" for x, y in points)
+
+
+def parse_normalized_points(encoded: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for token in encoded.split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        left, right = token.split(":", 1)
+        try:
+            points.append((float(left), float(right)))
+        except ValueError:
+            continue
+    return points
+
+
+def format_sdr_max_fraction(point: tuple[float, float]) -> str:
+    return f"{point[0]:.4f}:{point[1]:.4f}"
+
+
+def parse_sdr_max_fraction(encoded: str, fallback: tuple[float, float] = (1.0, 1.0)) -> tuple[float, float]:
+    if not encoded or ":" not in encoded:
+        return fallback
+    left, right = encoded.split(":", 1)
+    try:
+        return float(left), float(right)
+    except ValueError:
+        return fallback
+
+
+@dataclass
+class UserToneCurvePreset:
+    id: str
+    display_name: str
+    normalized_points: list[tuple[float, float]]
+    sdr_max_fraction: tuple[float, float] = (1.0, 1.0)
+
+
+def normalize_current_curve(settings: dict[str, object]) -> UserToneCurvePreset:
+    ref = max(float(settings["ReferenceNits"]), 1e-3)
+    peak = max(float(settings["MaxNits"]), ref)
+    sdr_x, sdr_y = parse_sdr_max_point(str(settings.get("SdrMaxPoint", "")), (peak, peak))
+    if isinstance(settings.get("SdrMaxPoint"), tuple):
+        sdr_x, sdr_y = settings["SdrMaxPoint"]
+    intermediates = parse_tone_curve_points(str(settings.get("ToneCurvePoints", "")))
+    if isinstance(settings.get("ToneCurvePoints"), list):
+        intermediates = [(float(x), float(y)) for x, y in settings["ToneCurvePoints"]]
+    preset_id = sanitize_user_preset_key(str(settings.get("ToneCurveUserPresetId", "preset")))
+    return UserToneCurvePreset(
+        id=preset_id,
+        display_name=preset_id,
+        normalized_points=[(x / ref, y / peak) for x, y in intermediates],
+        sdr_max_fraction=(sdr_x / ref, sdr_y / peak),
+    )
+
+
+def apply_user_tone_curve_preset(settings: dict[str, object], preset: UserToneCurvePreset) -> None:
+    ref = max(float(settings["ReferenceNits"]), 1e-3)
+    peak = max(float(settings["MaxNits"]), ref)
+    sdr_x = preset.sdr_max_fraction[0] * ref
+    sdr_y = preset.sdr_max_fraction[1] * peak
+    intermediates = [(x * ref, y * peak) for x, y in preset.normalized_points]
+    intermediates = sanitize_intermediate_points(intermediates, sdr_x, peak, ref)
+    sdr_x, sdr_y = sanitize_sdr_max_point(sdr_x, sdr_y, ref, peak, intermediates)
+    settings["SdrMaxPoint"] = format_sdr_max_point((sdr_x, sdr_y))
+    settings["ToneCurvePoints"] = format_tone_curve_points(intermediates)
+
+
+def load_user_tone_curve_presets(cfg_path: Path) -> list[UserToneCurvePreset]:
+    parser = parse_config_file(cfg_path)
+    if not parser.has_section(GROUP_USER_PRESETS):
+        return []
+    ids_raw = parser.get(GROUP_USER_PRESETS, "PresetList", fallback="")
+    ids = [item.strip() for item in re.split(r"[,\s]+", ids_raw) if item.strip()]
+    presets: list[UserToneCurvePreset] = []
+    for preset_id in ids:
+        loaded = load_user_tone_curve_preset(cfg_path, preset_id)
+        if loaded is not None:
+            presets.append(loaded)
+    return presets
+
+
+def load_user_tone_curve_preset(cfg_path: Path, preset_id: str) -> UserToneCurvePreset | None:
+    parser = parse_config_file(cfg_path)
+    section = user_preset_group_name(preset_id)
+    if not parser.has_section(section):
+        return None
+    entries = read_section_entries(parser, section)
+    return UserToneCurvePreset(
+        id=preset_id,
+        display_name=entries.get("DisplayName", preset_id),
+        normalized_points=parse_normalized_points(entries.get("NormalizedPoints", "")),
+        sdr_max_fraction=parse_sdr_max_fraction(entries.get("SdrMaxFraction", "")),
+    )
+
+
+def save_user_tone_curve_preset(cfg_path: Path, preset: UserToneCurvePreset) -> bool:
+    if not preset.id:
+        return False
+    parser = parse_config_file(cfg_path)
+    if not parser.has_section(GROUP_USER_PRESETS):
+        parser.add_section(GROUP_USER_PRESETS)
+    ids_raw = parser.get(GROUP_USER_PRESETS, "PresetList", fallback="")
+    ids = [item.strip() for item in re.split(r"[,\s]+", ids_raw) if item.strip()]
+    if preset.id not in ids:
+        ids.append(preset.id)
+    parser.set(GROUP_USER_PRESETS, "PresetList", ",".join(ids))
+
+    section = user_preset_group_name(preset.id)
+    if not parser.has_section(section):
+        parser.add_section(section)
+    parser.set(section, "DisplayName", preset.display_name or preset.id)
+    parser.set(section, "NormalizedPoints", format_normalized_points(preset.normalized_points))
+    parser.set(section, "SdrMaxFraction", format_sdr_max_fraction(preset.sdr_max_fraction))
+    write_config_file_atomic(cfg_path, parser)
+    return True
+
+
+def delete_user_tone_curve_preset(cfg_path: Path, preset_id: str) -> bool:
+    if not preset_id:
+        return False
+    parser = parse_config_file(cfg_path)
+    if parser.has_section(GROUP_USER_PRESETS):
+        ids_raw = parser.get(GROUP_USER_PRESETS, "PresetList", fallback="")
+        ids = [item.strip() for item in re.split(r"[,\s]+", ids_raw) if item.strip()]
+        ids = [item for item in ids if item != preset_id]
+        if ids:
+            parser.set(GROUP_USER_PRESETS, "PresetList", ",".join(ids))
+        elif parser.has_option(GROUP_USER_PRESETS, "PresetList"):
+            parser.remove_option(GROUP_USER_PRESETS, "PresetList")
+    section = user_preset_group_name(preset_id)
+    if parser.has_section(section):
+        parser.remove_section(section)
+    write_config_file_atomic(cfg_path, parser)
+    return True
+
+
+def _points_match(
+    a: list[tuple[float, float]], b: list[tuple[float, float]], tolerance_nits: float
+) -> bool:
+    if len(a) != len(b):
+        return False
+    for (ax, ay), (bx, by) in zip(a, b):
+        if abs(ax - bx) > tolerance_nits or abs(ay - by) > tolerance_nits:
+            return False
+    return True
+
+
+def _sdr_max_matches_preset(settings: dict[str, object], tolerance_nits: float) -> bool:
+    ref = float(settings["ReferenceNits"])
+    peak = float(settings["MaxNits"])
+    sdr_x, sdr_y = parse_sdr_max_point(str(settings.get("SdrMaxPoint", "")), (peak, peak))
+    return abs(sdr_x - ref) <= tolerance_nits and abs(sdr_y - peak) <= tolerance_nits
+
+
+def detect_matching_preset(settings: dict[str, object], tolerance_nits: float = 2.0) -> str:
+    if not _sdr_max_matches_preset(settings, tolerance_nits):
+        return PRESET_CUSTOM
+
+    intermediates = parse_tone_curve_points(str(settings.get("ToneCurvePoints", "")))
+    if not intermediates:
+        return PRESET_LINEAR
+
+    ref = float(settings["ReferenceNits"])
+    peak = float(settings["MaxNits"])
+    for preset in BUILT_IN_PRESETS:
+        if preset == PRESET_LINEAR:
+            continue
+        generated = generate_preset_intermediate_points(preset, ref, peak)
+        if _points_match(intermediates, generated, tolerance_nits):
+            return preset
+    return PRESET_CUSTOM
 
 
 def qt_available() -> bool:
@@ -755,51 +1030,13 @@ def qt_available() -> bool:
     return True
 
 
-def clamp_setting_value(key: str, value: float, reference: int, max_nits: int) -> float:
-    if key == "MaxNits":
-        return clamp_peak(value, reference, max_nits)
-    if key == "MidPoint":
-        return clamp_paper_white(value)
-    if key == "BlackPoint":
-        return clamp_black(value)
-    if key == "Vibrance":
-        return clamp_vibrance(value)
-    if key == "HighlightExpansion":
-        return clamp_highlight_expansion(value)
-    if key == "HighlightLift":
-        return clamp_highlight_lift(value)
-    if key == "HighlightRange":
-        return clamp_highlight_range(value)
-    if key == "GamutExpansion":
-        return clamp_gamut_expansion(value)
-    return value
-
-
-def settings_from_values(
-    values: dict[str, float], base: dict[str, object], reference: int, max_nits: int
-) -> dict[str, object]:
-    updated = base.copy()
-    updated["MaxNits"] = clamp_peak(values["MaxNits"], reference, max_nits)
-    updated["MidPoint"] = clamp_paper_white(values["MidPoint"])
-    updated["BlackPoint"] = clamp_black(values["BlackPoint"])
-    updated["Vibrance"] = clamp_vibrance(values["Vibrance"])
-    updated["HighlightExpansion"] = clamp_highlight_expansion(values["HighlightExpansion"])
-    updated["HighlightLift"] = clamp_highlight_lift(values["HighlightLift"])
-    updated["HighlightRange"] = clamp_highlight_range(values["HighlightRange"])
-    updated["GamutExpansion"] = clamp_gamut_expansion(values["GamutExpansion"])
-    return updated
-
-
 def settings_from_curve(
     curve_values: dict[str, object],
     base: dict[str, object],
     reference: int,
     max_nits: int,
-    *,
-    use_tone_curve: bool,
 ) -> dict[str, object]:
     updated = base.copy()
-    updated["UseToneCurve"] = use_tone_curve
     updated["ReferenceNits"] = clamp_reference_nits(float(curve_values["ReferenceNits"]))
     updated["MaxNits"] = clamp_curve_peak(
         float(curve_values["MaxNits"]), float(updated["ReferenceNits"]), max_nits
@@ -815,6 +1052,9 @@ def settings_from_curve(
     sdr_x, sdr_y = snap_sdr_max_point_for_save(sdr_x, sdr_y, peak)
     updated["SdrMaxPoint"] = format_sdr_max_point((sdr_x, sdr_y))
     updated["ToneCurvePoints"] = format_tone_curve_points(list(curve_values["ToneCurvePoints"]))
+    updated["ToneCurvePreset"] = preset_to_string(str(curve_values.get("ToneCurvePreset", PRESET_CUSTOM)))
+    updated["ToneCurveUserPresetId"] = str(curve_values.get("ToneCurveUserPresetId", "")).strip()
+    updated["BlackPoint"] = clamp_black(float(curve_values.get("BlackPoint", updated.get("BlackPoint", 0.0))))
     updated["Vibrance"] = clamp_vibrance(float(curve_values.get("Vibrance", updated.get("Vibrance", 0.0))))
     updated["GamutExpansion"] = clamp_gamut_expansion(
         float(curve_values.get("GamutExpansion", updated.get("GamutExpansion", 1.5)))
@@ -855,17 +1095,6 @@ class CalibrationSession:
     committed: bool = False
 
 
-def commit_settings(
-    values: dict[str, float],
-    base: dict[str, object],
-    reference: int,
-    max_nits: int,
-    session: CalibrationSession,
-) -> bool:
-    saved = settings_from_values(values, base, reference, max_nits)
-    return commit_settings_dict(saved, session)
-
-
 def restore_baseline(
     baseline_settings: dict[str, object],
     session: CalibrationSession,
@@ -896,106 +1125,25 @@ def run_qt_form(
     max_nits: int,
     session: CalibrationSession,
 ) -> bool:
-    from PySide6.QtCore import QPointF, Qt, QRectF, Signal  # noqa: PLC0415
+    from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QRectF, Signal  # noqa: PLC0415
     from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen  # noqa: PLC0415
     from PySide6.QtWidgets import (  # noqa: PLC0415
-        QAbstractSpinBox,
         QApplication,
+        QComboBox,
         QDialog,
         QDialogButtonBox,
         QDoubleSpinBox,
+        QFormLayout,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
-        QSlider,
+        QLineEdit,
+        QMessageBox,
+        QPushButton,
         QSpinBox,
-        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
-
-    class SettingRow(QWidget):
-        committed = Signal()
-
-        def __init__(self, spec: SettingSpec, value: float, parent: QWidget | None = None) -> None:
-            super().__init__(parent)
-            self.spec = spec
-            self._block = False
-
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(QLabel(spec.label))
-
-            row = QHBoxLayout()
-            self.slider = QSlider(Qt.Orientation.Horizontal)
-            self.slider.setRange(0, SLIDER_STEPS)
-
-            if spec.integer:
-                spin: QSpinBox | QDoubleSpinBox = QSpinBox()
-                spin.setRange(int(spec.vmin), int(spec.vmax))
-                spin.setSingleStep(max(1, int(spec.step)))
-            else:
-                spin = QDoubleSpinBox()
-                spin.setDecimals(spec.decimals)
-                spin.setRange(spec.vmin, spec.vmax)
-                spin.setSingleStep(spec.step)
-
-            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            spin.setFixedWidth(72)
-            self.spin = spin
-
-            row.addWidget(self.slider, stretch=1)
-            row.addWidget(spin)
-            layout.addLayout(row)
-
-            self.slider.valueChanged.connect(self._on_slider_changed)
-            self.slider.sliderReleased.connect(self._on_slider_released)
-            spin.valueChanged.connect(self._on_spin_changed)
-            spin.editingFinished.connect(self._on_spin_committed)
-
-            clamped = clamp_setting_value(spec.key, float(value), reference, max_nits)
-            self._apply_value(clamped)
-
-        def value(self) -> float:
-            if self.spec.integer:
-                return float(self.spin.value())
-            return float(self.spin.value())
-
-        def _slider_position(self, normalized: float) -> int:
-            return int(round(max(0.0, min(1.0, normalized)) * SLIDER_STEPS))
-
-        def _set_spin_value(self, value: float) -> None:
-            if self.spec.integer:
-                self.spin.setValue(int(round(value)))
-            else:
-                self.spin.setValue(value)
-
-        def _apply_value(self, value: float) -> None:
-            self._block = True
-            normalized = value_to_normalized(value, self.spec.vmin, self.spec.vmax)
-            self.slider.setValue(self._slider_position(normalized))
-            self._set_spin_value(value)
-            self._block = False
-
-        def _on_slider_changed(self, _position: int) -> None:
-            if self._block:
-                return
-            normalized = self.slider.value() / SLIDER_STEPS
-            value = normalized_to_value(normalized, self.spec.vmin, self.spec.vmax, self.spec.step)
-            self._apply_value(value)
-
-        def _on_slider_released(self) -> None:
-            self.committed.emit()
-
-        def _on_spin_changed(self, spin_value: float | int) -> None:
-            if self._block:
-                return
-            value = clamp_setting_value(self.spec.key, float(spin_value), reference, max_nits)
-            self._apply_value(value)
-
-        def _on_spin_committed(self) -> None:
-            if self._block:
-                return
-            self.committed.emit()
 
     class ToneCurveEditor(QWidget):
         committed = Signal()
@@ -1018,47 +1166,232 @@ def run_qt_form(
             peak = float(initial_settings["MaxNits"])
             self.peak_nits = peak
             self.reference_nits = clamp_reference_nits(
-                float(initial_settings.get("ReferenceNits", initial_settings["MidPoint"]))
+                float(initial_settings.get("ReferenceNits", 203.0))
             )
             self.sdr_max_point = parse_sdr_max_point(str(initial_settings.get("SdrMaxPoint", "")), (peak, peak))
             self.intermediate_points = parse_tone_curve_points(str(initial_settings.get("ToneCurvePoints", "")))
+            self.tone_curve_preset = preset_to_string(str(initial_settings.get("ToneCurvePreset", PRESET_LINEAR)))
+            self.tone_curve_user_preset_id = str(initial_settings.get("ToneCurveUserPresetId", "")).strip()
             self.vibrance_value = float(initial_settings.get("Vibrance", 0.0))
             self.gamut_value = float(initial_settings.get("GamutExpansion", 1.5))
+            self.black_point_value = clamp_black(float(initial_settings.get("BlackPoint", 0.0)))
+            self._cfg_path = config_path()
 
             layout = QVBoxLayout(self)
-            inputs = QHBoxLayout()
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+
+            preset_row = QHBoxLayout()
+            self.preset_combo = QComboBox(self)
+            self.save_preset_btn = QPushButton("Save preset…", self)
+            self.update_preset_btn = QPushButton("Update preset", self)
+            self.delete_preset_btn = QPushButton("Delete preset", self)
+            preset_row.addWidget(QLabel("Curve preset:"))
+            preset_row.addWidget(self.preset_combo, 1)
+            preset_row.addWidget(self.save_preset_btn)
+            preset_row.addWidget(self.update_preset_btn)
+            preset_row.addWidget(self.delete_preset_btn)
+            layout.addLayout(preset_row)
+
+            body = QHBoxLayout()
+            body.setSpacing(16)
+            self.plot_host = QWidget(self)
+            self.plot_host.setMinimumSize(PLOT_SIZE, PLOT_SIZE)
+            self.plot_host.installEventFilter(self)
+            body.addWidget(self.plot_host)
+
+            controls = QFormLayout()
+            controls.setContentsMargins(0, 8, 0, 0)
+            controls.setVerticalSpacing(8)
             self.peak_spin = QSpinBox(self)
             self.peak_spin.setSingleStep(10)
             self.reference_spin = QSpinBox(self)
             self.reference_spin.setRange(int(REFERENCE_NITS_MIN), int(REFERENCE_NITS_MAX))
             self.reference_spin.setSingleStep(1)
-            inputs.addWidget(QLabel("Peak nits:"))
-            inputs.addWidget(self.peak_spin)
-            inputs.addSpacing(12)
-            inputs.addWidget(QLabel("Reference nits:"))
-            inputs.addWidget(self.reference_spin)
-            inputs.addStretch()
-            layout.addLayout(inputs)
-
-            readout = QHBoxLayout()
+            self.black_point_spin = QDoubleSpinBox(self)
+            self.black_point_spin.setRange(-0.01, 0.01)
+            self.black_point_spin.setDecimals(4)
+            self.black_point_spin.setSingleStep(0.0001)
+            self.vibrance_spin = QDoubleSpinBox(self)
+            self.vibrance_spin.setRange(0.0, 10.0)
+            self.vibrance_spin.setSingleStep(0.1)
+            self.gamut_spin = QDoubleSpinBox(self)
+            self.gamut_spin.setRange(0.0, 20.0)
+            self.gamut_spin.setSingleStep(0.1)
             self.input_label = QLabel("Input: —", self)
             self.output_label = QLabel("Output: —", self)
-            readout.addWidget(self.input_label)
-            readout.addSpacing(16)
-            readout.addWidget(self.output_label)
-            readout.addStretch()
-            layout.addLayout(readout)
-            layout.addStretch()
+            controls.addRow("Peak nits:", self.peak_spin)
+            controls.addRow("Reference nits:", self.reference_spin)
+            controls.addRow("Black point:", self.black_point_spin)
+            controls.addRow("Vibrance:", self.vibrance_spin)
+            controls.addRow("Gamut expansion:", self.gamut_spin)
+            controls.addRow(self.input_label)
+            controls.addRow(self.output_label)
+            body.addLayout(controls, 1)
+            layout.addLayout(body)
 
-            self.setMinimumSize(PLOT_SIZE + 40, PLOT_SIZE + 120)
+            self.setMinimumSize(PLOT_SIZE + 180, PLOT_SIZE + 56)
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
             self.peak_spin.valueChanged.connect(self._on_peak_spin_changed)
             self.peak_spin.editingFinished.connect(self._emit_committed)
             self.reference_spin.valueChanged.connect(self._on_reference_spin_changed)
             self.reference_spin.editingFinished.connect(self._emit_committed)
+            self.black_point_spin.valueChanged.connect(self._on_black_point_changed)
+            self.black_point_spin.editingFinished.connect(self._emit_committed)
+            self.vibrance_spin.valueChanged.connect(self._on_vibrance_changed)
+            self.vibrance_spin.editingFinished.connect(self._emit_committed)
+            self.gamut_spin.valueChanged.connect(self._on_gamut_changed)
+            self.gamut_spin.editingFinished.connect(self._emit_committed)
+            self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+            self.preset_combo.activated.connect(self._emit_committed)
+            self.save_preset_btn.clicked.connect(self._save_user_preset)
+            self.update_preset_btn.clicked.connect(self._update_user_preset)
+            self.delete_preset_btn.clicked.connect(self._delete_user_preset)
 
+            self._rebuild_preset_combo()
+            self._update_preset_action_buttons()
             self._apply_spin_values()
+
+        def _current_combo_id(self) -> str:
+            if self.tone_curve_preset == PRESET_CUSTOM:
+                return PRESET_CUSTOM
+            if self.tone_curve_preset == PRESET_USER:
+                return user_preset_combo_id(self.tone_curve_user_preset_id)
+            return self.tone_curve_preset
+
+        def _current_settings(self) -> dict[str, object]:
+            return {
+                "ReferenceNits": self.reference_nits,
+                "MaxNits": self.peak_nits,
+                "SdrMaxPoint": self.sdr_max_point,
+                "ToneCurvePoints": list(self.intermediate_points),
+                "ToneCurvePreset": self.tone_curve_preset,
+                "ToneCurveUserPresetId": self.tone_curve_user_preset_id,
+            }
+
+        def _rebuild_preset_combo(self) -> None:
+            previous_id = self._current_combo_id()
+            self._block = True
+            self.preset_combo.clear()
+            for preset in BUILT_IN_PRESETS:
+                self.preset_combo.addItem(preset_display_name(preset), preset)
+            user_presets = load_user_tone_curve_presets(self._cfg_path)
+            if user_presets:
+                self.preset_combo.insertSeparator(self.preset_combo.count())
+                for preset in user_presets:
+                    self.preset_combo.addItem(preset.display_name, user_preset_combo_id(preset.id))
+            self.preset_combo.insertSeparator(self.preset_combo.count())
+            self.preset_combo.addItem(preset_display_name(PRESET_CUSTOM), PRESET_CUSTOM)
+            index = self.preset_combo.findData(previous_id)
+            if index >= 0:
+                self.preset_combo.setCurrentIndex(index)
+            self._block = False
+
+        def _sync_preset_combo(self) -> None:
+            index = self.preset_combo.findData(self._current_combo_id())
+            if index >= 0:
+                self._block = True
+                self.preset_combo.setCurrentIndex(index)
+                self._block = False
+
+        def _update_preset_action_buttons(self) -> None:
+            user_active = self.tone_curve_preset == PRESET_USER and bool(self.tone_curve_user_preset_id)
+            self.save_preset_btn.setEnabled(True)
+            self.update_preset_btn.setEnabled(user_active)
+            self.delete_preset_btn.setEnabled(user_active)
+
+        def _mark_custom_preset(self) -> None:
+            if self.tone_curve_preset == PRESET_CUSTOM:
+                return
+            self.tone_curve_preset = PRESET_CUSTOM
+            self.tone_curve_user_preset_id = ""
+            self._sync_preset_combo()
+            self._update_preset_action_buttons()
+
+        def _apply_active_preset(self) -> None:
+            if self.tone_curve_preset == PRESET_CUSTOM:
+                return
+            settings = self._current_settings()
+            apply_tone_curve_preset(settings, self._cfg_path)
+            self.sdr_max_point = parse_sdr_max_point(str(settings["SdrMaxPoint"]), (self.peak_nits, self.peak_nits))
+            self.intermediate_points = parse_tone_curve_points(str(settings["ToneCurvePoints"]))
+
+        def _set_preset_from_combo_id(self, combo_id: str, apply_curve: bool) -> None:
+            if combo_id == PRESET_CUSTOM:
+                return
+            if is_user_preset_combo_id(combo_id):
+                self.tone_curve_preset = PRESET_USER
+                self.tone_curve_user_preset_id = user_preset_id_from_combo_id(combo_id)
+            else:
+                self.tone_curve_preset = preset_to_string(combo_id)
+                self.tone_curve_user_preset_id = ""
+            self._sync_preset_combo()
+            self._update_preset_action_buttons()
+            if apply_curve:
+                self._apply_active_preset()
+                self._sanitize_curve_points()
+
+        def _on_preset_changed(self, index: int) -> None:
+            if self._block or index < 0:
+                return
+            combo_id = str(self.preset_combo.itemData(index))
+            self._set_preset_from_combo_id(combo_id, True)
+            self.update()
+
+        def _save_user_preset(self) -> None:
+            self._read_spin_values()
+            self._sanitize_curve_points()
+            name, ok = QInputDialog.getText(self, "Save Tone Curve Preset", "Preset name:")
+            name = str(name).strip()
+            if not ok or not name:
+                return
+            preset = normalize_current_curve(self._current_settings())
+            preset.id = sanitize_user_preset_key(name)
+            preset.display_name = name
+            if not save_user_tone_curve_preset(self._cfg_path, preset):
+                return
+            self.tone_curve_preset = PRESET_USER
+            self.tone_curve_user_preset_id = preset.id
+            self._rebuild_preset_combo()
+            self._sync_preset_combo()
+            self._update_preset_action_buttons()
+            self.update()
+            self.committed.emit()
+
+        def _update_user_preset(self) -> None:
+            if self.tone_curve_preset != PRESET_USER or not self.tone_curve_user_preset_id:
+                return
+            self._read_spin_values()
+            self._sanitize_curve_points()
+            preset = normalize_current_curve(self._current_settings())
+            preset.id = self.tone_curve_user_preset_id
+            existing = load_user_tone_curve_preset(self._cfg_path, self.tone_curve_user_preset_id)
+            preset.display_name = existing.display_name if existing else self.tone_curve_user_preset_id
+            save_user_tone_curve_preset(self._cfg_path, preset)
+            self._rebuild_preset_combo()
+            self._sync_preset_combo()
+            self.update()
+            self.committed.emit()
+
+        def _delete_user_preset(self) -> None:
+            if self.tone_curve_preset != PRESET_USER or not self.tone_curve_user_preset_id:
+                return
+            answer = QMessageBox.question(
+                self,
+                "Delete Tone Curve Preset",
+                f'Delete preset "{self.tone_curve_user_preset_id}"?',
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            delete_user_tone_curve_preset(self._cfg_path, self.tone_curve_user_preset_id)
+            self.tone_curve_preset = PRESET_CUSTOM
+            self.tone_curve_user_preset_id = ""
+            self._rebuild_preset_combo()
+            self._sync_preset_combo()
+            self._update_preset_action_buttons()
+            self.update()
+            self.committed.emit()
 
         def _peak_min(self) -> int:
             return int(round(self.reference_nits)) + 1
@@ -1094,18 +1427,23 @@ def run_qt_form(
                 self._maybe_snap_sdr_max_point(previous_peak)
             self._sync_spin_ranges()
 
-        def seed_from_legacy(self, mid_point: float, peak: float) -> None:
-            self.peak_nits = peak
-            self.reference_nits = clamp_reference_nits(mid_point)
-            self.sdr_max_point = (self.reference_nits, peak)
-            self.intermediate_points = []
-            self._apply_spin_values()
+        def set_black_point(self, value: float) -> None:
+            self._block = True
+            self.black_point_value = clamp_black(value)
+            self.black_point_spin.setValue(self.black_point_value)
+            self._block = False
+
+        def black_point(self) -> float:
+            return self.black_point_value
 
         def _apply_spin_values(self) -> None:
             self._block = True
             self._sync_spin_ranges()
             self.peak_spin.setValue(int(round(self.peak_nits)))
             self.reference_spin.setValue(int(round(self.reference_nits)))
+            self.black_point_spin.setValue(self.black_point_value)
+            self.vibrance_spin.setValue(self.vibrance_value)
+            self.gamut_spin.setValue(self.gamut_value)
             self._enforce_peak_floor()
             self._sanitize_curve_points()
             self._block = False
@@ -1114,11 +1452,23 @@ def run_qt_form(
         def _read_spin_values(self) -> None:
             self.peak_spin.interpretText()
             self.reference_spin.interpretText()
+            self.black_point_spin.interpretText()
             self.peak_nits = float(self.peak_spin.value())
             self.reference_nits = clamp_reference_nits(float(self.reference_spin.value()))
+            self.black_point_value = clamp_black(float(self.black_point_spin.value()))
+            self.vibrance_value = clamp_vibrance(float(self.vibrance_spin.value()))
+            self.gamut_value = clamp_gamut_expansion(float(self.gamut_spin.value()))
+
+        def _plot_host_rect(self) -> QRectF:
+            top_left = self.plot_host.mapTo(self, QPoint(0, 0))
+            return QRectF(float(top_left.x()), float(top_left.y()), self.plot_host.width(), self.plot_host.height())
 
         def _plot_rect(self) -> QRectF:
-            return QRectF(20.0, 60.0, PLOT_SIZE, PLOT_SIZE)
+            return self._plot_host_rect().adjusted(0, PLOT_LABEL_TOP, 0, -PLOT_LABEL_BOTTOM)
+
+        def _map_plot_event_pos(self, plot_local_pos: QPointF) -> QPointF:
+            plot = self._plot_rect()
+            return QPointF(plot.left() + plot_local_pos.x(), plot.top() + plot_local_pos.y() - PLOT_LABEL_TOP)
 
         def _interactive_rect(self) -> QRectF:
             return self._plot_rect().adjusted(-HIT_PADDING, -HIT_PADDING, HIT_PADDING, HIT_PADDING)
@@ -1178,11 +1528,35 @@ def run_qt_form(
             elif sender is self.reference_spin:
                 self.reference_spin.interpretText()
                 self._on_reference_spin_changed()
+            elif sender is self.black_point_spin:
+                self.black_point_spin.interpretText()
+                self._on_black_point_changed()
+            elif sender is self.vibrance_spin:
+                self.vibrance_spin.interpretText()
+                self._on_vibrance_changed()
+            elif sender is self.gamut_spin:
+                self.gamut_spin.interpretText()
+                self._on_gamut_changed()
             else:
                 self._read_spin_values()
                 self._sanitize_curve_points()
                 self.update()
             self.committed.emit()
+
+        def _on_black_point_changed(self) -> None:
+            if self._block:
+                return
+            self.black_point_value = clamp_black(float(self.black_point_spin.value()))
+
+        def _on_vibrance_changed(self) -> None:
+            if self._block:
+                return
+            self.vibrance_value = clamp_vibrance(float(self.vibrance_spin.value()))
+
+        def _on_gamut_changed(self) -> None:
+            if self._block:
+                return
+            self.gamut_value = clamp_gamut_expansion(float(self.gamut_spin.value()))
 
         def _on_peak_spin_changed(self) -> None:
             if self._block:
@@ -1192,6 +1566,7 @@ def run_qt_form(
             if previous_peak != self.peak_nits:
                 self._maybe_snap_sdr_max_point(previous_peak)
             self._sync_spin_ranges()
+            self._apply_active_preset()
             self._sanitize_curve_points()
             self.update()
 
@@ -1202,6 +1577,7 @@ def run_qt_form(
             self.peak_nits = float(self.peak_spin.value())
             self.reference_nits = clamp_reference_nits(float(self.reference_spin.value()))
             self._enforce_peak_floor()
+            self._apply_active_preset()
             self._sanitize_curve_points()
             self.update()
 
@@ -1213,6 +1589,9 @@ def run_qt_form(
                 "ReferenceNits": self.reference_nits,
                 "SdrMaxPoint": self.sdr_max_point,
                 "ToneCurvePoints": list(self.intermediate_points),
+                "ToneCurvePreset": self.tone_curve_preset,
+                "ToneCurveUserPresetId": self.tone_curve_user_preset_id,
+                "BlackPoint": float(self.black_point_value),
                 "Vibrance": float(self.vibrance_value),
                 "GamutExpansion": float(self.gamut_value),
             }
@@ -1220,8 +1599,9 @@ def run_qt_form(
         def paintEvent(self, _event) -> None:  # noqa: ANN001, N802
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            host = self._plot_host_rect()
             plot = self._plot_rect()
-            painter.fillRect(plot, QColor(32, 32, 32))
+            painter.fillRect(host, QColor(32, 32, 32))
 
             painter.setPen(QColor(70, 70, 70))
             for i in range(1, 4):
@@ -1266,23 +1646,60 @@ def run_qt_form(
             )
 
             painter.setPen(QColor(180, 180, 180))
-            painter.drawText(QRectF(plot.left(), plot.bottom() + 6, plot.width() / 2, 16), Qt.AlignmentFlag.AlignLeft, "0 nits")
+            bottom_label_height = host.bottom() - plot.bottom()
             painter.drawText(
-                QRectF(plot.center().x(), plot.bottom() + 6, plot.width() / 2, 16),
-                Qt.AlignmentFlag.AlignRight,
+                QRectF(plot.left(), plot.bottom(), plot.width() / 2.0, bottom_label_height),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                "0 nits",
+            )
+            painter.drawText(
+                QRectF(plot.center().x(), plot.bottom(), plot.width() / 2.0, bottom_label_height),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                 f"{round(self.reference_nits)} SDR nits",
             )
             painter.drawText(
-                QRectF(plot.left() - 18, plot.top() - 4, 60, 16),
-                Qt.AlignmentFlag.AlignLeft,
+                QRectF(host.left(), host.top(), host.width() * 0.55, PLOT_LABEL_TOP),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 f"{round(self.peak_nits)} nits",
             )
 
-        def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-            hit = self._hit_test(event.position())
-            if event.modifiers() & Qt.KeyboardModifier.ControlModifier and hit >= 0:
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+            if watched is not self.plot_host:
+                return super().eventFilter(watched, event)
+
+            if event.type() in {
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseMove,
+                QEvent.Type.MouseButtonDblClick,
+                QEvent.Type.ContextMenu,
+            }:
+                mouse_event = event
+                assert isinstance(mouse_event, QMouseEvent)
+                mapped_pos = self._map_plot_event_pos(mouse_event.position())
+                if event.type() == QEvent.Type.MouseButtonPress:
+                    self._handle_plot_mouse_press(mapped_pos, mouse_event.modifiers())
+                    return True
+                if event.type() == QEvent.Type.MouseMove:
+                    self._handle_plot_mouse_move(mapped_pos)
+                    return True
+                if event.type() == QEvent.Type.MouseButtonRelease:
+                    self._handle_plot_mouse_release()
+                    return True
+                if event.type() == QEvent.Type.MouseButtonDblClick:
+                    self._handle_plot_mouse_double_click(mapped_pos)
+                    return True
+                if event.type() == QEvent.Type.ContextMenu:
+                    self._handle_plot_context_menu(mapped_pos, mouse_event.globalPosition().toPoint())
+                    return True
+            return super().eventFilter(watched, event)
+
+        def _handle_plot_mouse_press(self, pos: QPointF, modifiers: Qt.KeyboardModifier) -> None:
+            hit = self._hit_test(pos)
+            if modifiers & Qt.KeyboardModifier.ControlModifier and hit >= 0:
                 del self.intermediate_points[hit]
                 self._selected_index = -1
+                self._mark_custom_preset()
                 self._sanitize_curve_points()
                 self.update()
                 self._emit_committed()
@@ -1296,20 +1713,20 @@ def run_qt_form(
                 self._drag_index = hit
                 self._selected_index = hit
                 self.setFocus()
-            elif not self._plot_rect().contains(event.position()):
-                return
             else:
                 return
-            input_nits, _ = self._pixel_to_nits(event.position())
+            input_nits, _ = self._pixel_to_nits(pos)
             self._update_readout(input_nits)
 
-        def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        def _handle_plot_mouse_move(self, pos: QPointF) -> None:
             if self._drag_target is None:
-                if self._interactive_rect().contains(event.position()):
-                    input_nits, _ = self._pixel_to_nits(event.position())
+                if self._interactive_rect().contains(pos):
+                    input_nits, _ = self._pixel_to_nits(pos)
                     self._update_readout(input_nits)
                 return
-            input_nits, output_nits = self._pixel_to_nits(event.position())
+
+            self._mark_custom_preset()
+            input_nits, output_nits = self._pixel_to_nits(pos)
             max_input = self.reference_nits
             if self._drag_target == "sdr":
                 clamped_x = max(0.0, min(max_input, input_nits))
@@ -1328,41 +1745,43 @@ def run_qt_form(
                     if self._drag_index + 1 < len(self.intermediate_points)
                     else self.sdr_max_point[0] - 1.0
                 )
+                x = max(prev_x + 1.0, min(x, next_x - 1.0))
                 prev_y = self.intermediate_points[self._drag_index - 1][1] if self._drag_index > 0 else 0.0
-                x = max(prev_x + 1.0, min(next_x - 1.0, x))
                 y = max(prev_y, y)
                 self.intermediate_points[self._drag_index] = (x, y)
                 self._sanitize_curve_points()
             self._update_readout(input_nits)
             self.update()
 
-        def mouseReleaseEvent(self, _event: QMouseEvent) -> None:  # noqa: N802
+        def _handle_plot_mouse_release(self) -> None:
             if self._drag_target is not None:
                 self._drag_target = None
                 self._drag_index = -1
                 self._emit_committed()
 
-        def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-            if not self._plot_rect().contains(event.position()) or self._hit_test(event.position()) != -1:
+        def _handle_plot_mouse_double_click(self, pos: QPointF) -> None:
+            if not self._plot_rect().contains(pos) or self._hit_test(pos) != -1:
                 return
-            input_nits, output_nits = self._pixel_to_nits(event.position())
+            input_nits, output_nits = self._pixel_to_nits(pos)
             input_nits = max(1.0, min(self.sdr_max_point[0] - 1.0, input_nits))
             output_nits = max(0.0, min(self.peak_nits, output_nits))
+            self._mark_custom_preset()
             self.intermediate_points.append((input_nits, output_nits))
             self._sanitize_curve_points()
             self._emit_committed()
 
-        def contextMenuEvent(self, event) -> None:  # noqa: ANN001, N802
-            hit = self._hit_test(event.position())
+        def _handle_plot_context_menu(self, pos: QPointF, global_pos: QPoint) -> None:
+            hit = self._hit_test(pos)
             if hit < 0:
                 return
             from PySide6.QtWidgets import QMenu  # noqa: PLC0415
 
             menu = QMenu(self)
             remove_action = menu.addAction("Remove point")
-            if menu.exec(event.globalPos()) == remove_action:
+            if menu.exec(global_pos) == remove_action:
                 del self.intermediate_points[hit]
                 self._selected_index = -1
+                self._mark_custom_preset()
                 self._sanitize_curve_points()
                 self._emit_committed()
 
@@ -1374,6 +1793,7 @@ def run_qt_form(
                 return
             del self.intermediate_points[self._selected_index]
             self._selected_index = -1
+            self._mark_custom_preset()
             self._sanitize_curve_points()
             self._emit_committed()
 
@@ -1385,73 +1805,25 @@ def run_qt_form(
             dialog_reference: int,
             dialog_max_nits: int,
             dialog_session: CalibrationSession,
-            on_commit_simple,
             on_commit_curve,
             parent: QWidget | None = None,
         ) -> None:
             super().__init__(parent)
-            self.reference = dialog_reference
-            self.max_nits = dialog_max_nits
-            self.base_settings = initial_settings
             self.baseline_settings = dialog_baseline
             self.session = dialog_session
-            self.on_commit_simple = on_commit_simple
             self.on_commit_curve = on_commit_curve
-            self.curve_seeded = bool(initial_settings.get("UseToneCurve", False))
 
             title = "AutoHDR Calibration"
             if dialog_session.display_name:
                 title = f"{title} — {dialog_session.display_name}"
             self.setWindowTitle(title)
-            self.setMinimumWidth(420)
+            self.setMinimumWidth(560)
 
             layout = QVBoxLayout(self)
-            self.mode_tabs = QTabWidget(self)
-
-            simple_page = QWidget(self)
-            simple_layout = QVBoxLayout(simple_page)
-            self.rows: dict[str, SettingRow] = {}
-            simple_specs = [
-                spec
-                for spec in calibration_specs(dialog_reference, dialog_max_nits)
-                if spec.key not in {"Vibrance", "GamutExpansion"}
-            ]
-            for spec in simple_specs:
-                row = SettingRow(spec, float(initial_settings[spec.key]), simple_page)
-                row.committed.connect(self._commit_current)
-                simple_layout.addWidget(row)
-                self.rows[spec.key] = row
-            self.mode_tabs.addTab(simple_page, "Simple")
 
             self.tone_curve = ToneCurveEditor(dialog_reference, dialog_max_nits, initial_settings, self)
-            self.tone_curve.vibrance_value = float(initial_settings["Vibrance"])
-            self.tone_curve.gamut_value = float(initial_settings["GamutExpansion"])
             self.tone_curve.committed.connect(self._commit_current)
-            self.mode_tabs.addTab(self.tone_curve, "Tone Curve")
-            self.mode_tabs.setCurrentIndex(1 if bool(initial_settings.get("UseToneCurve", False)) else 0)
-            self.mode_tabs.currentChanged.connect(self._on_mode_changed)
-            layout.addWidget(self.mode_tabs)
-
-            shared = QHBoxLayout()
-            self.vibrance_spin = QDoubleSpinBox(self)
-            self.vibrance_spin.setRange(0.0, 10.0)
-            self.vibrance_spin.setSingleStep(0.1)
-            self.vibrance_spin.setValue(float(initial_settings["Vibrance"]))
-            self.gamut_spin = QDoubleSpinBox(self)
-            self.gamut_spin.setRange(0.0, 20.0)
-            self.gamut_spin.setSingleStep(0.1)
-            self.gamut_spin.setValue(float(initial_settings["GamutExpansion"]))
-            shared.addWidget(QLabel("Vibrance:"))
-            shared.addWidget(self.vibrance_spin)
-            shared.addSpacing(12)
-            shared.addWidget(QLabel("Gamut expansion:"))
-            shared.addWidget(self.gamut_spin)
-            shared.addStretch()
-            layout.addLayout(shared)
-            self.vibrance_spin.valueChanged.connect(self._sync_shared_values)
-            self.gamut_spin.valueChanged.connect(self._sync_shared_values)
-            self.vibrance_spin.editingFinished.connect(self._commit_current)
-            self.gamut_spin.editingFinished.connect(self._commit_current)
+            layout.addWidget(self.tone_curve)
 
             buttons = QDialogButtonBox(
                 QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1463,49 +1835,17 @@ def run_qt_form(
             buttons.rejected.connect(self._on_cancel)
             layout.addWidget(buttons)
 
-        def _sync_shared_values(self) -> None:
-            self.tone_curve.vibrance_value = float(self.vibrance_spin.value())
-            self.tone_curve.gamut_value = float(self.gamut_spin.value())
-
-        def _on_mode_changed(self, index: int) -> None:
-            if index == 1 and not self.curve_seeded:
-                mid_point = float(self.rows["MidPoint"].value()) if "MidPoint" in self.rows else 203.0
-                peak = float(self.rows["MaxNits"].value()) if "MaxNits" in self.rows else float(self.max_nits)
-                self.tone_curve.seed_from_legacy(mid_point, peak)
-                self.curve_seeded = True
-
-        def current_values(self) -> dict[str, float]:
-            return {key: row.value() for key, row in self.rows.items()}
-
         def _commit_current(self) -> None:
-            if self.mode_tabs.currentIndex() == 0:
-                values = self.current_values()
-                values["Vibrance"] = float(self.vibrance_spin.value())
-                values["GamutExpansion"] = float(self.gamut_spin.value())
-                self.on_commit_simple(values)
-            else:
-                curve_values = self.tone_curve.current_values()
-                curve_values["Vibrance"] = float(self.vibrance_spin.value())
-                curve_values["GamutExpansion"] = float(self.gamut_spin.value())
-                self.on_commit_curve(curve_values)
+            self.on_commit_curve(self.tone_curve.current_values())
 
         def _on_confirm(self) -> None:
-            if self.mode_tabs.currentIndex() == 1:
-                self.tone_curve.peak_spin.interpretText()
-                self.tone_curve.reference_spin.interpretText()
-            self._commit_current()
-            if self.mode_tabs.currentIndex() == 0:
-                values = self.current_values()
-                values["Vibrance"] = float(self.vibrance_spin.value())
-                values["GamutExpansion"] = float(self.gamut_spin.value())
-                if not self.on_commit_simple(values):
-                    return
-            else:
-                curve_values = self.tone_curve.current_values()
-                curve_values["Vibrance"] = float(self.vibrance_spin.value())
-                curve_values["GamutExpansion"] = float(self.gamut_spin.value())
-                if not self.on_commit_curve(curve_values):
-                    return
+            self.tone_curve.peak_spin.interpretText()
+            self.tone_curve.reference_spin.interpretText()
+            self.tone_curve.black_point_spin.interpretText()
+            self.tone_curve.vibrance_spin.interpretText()
+            self.tone_curve.gamut_spin.interpretText()
+            if not self.on_commit_curve(self.tone_curve.current_values()):
+                return
             self.accept()
 
         def _on_cancel(self) -> None:
@@ -1518,20 +1858,8 @@ def run_qt_form(
     if owns_app:
         app = QApplication(sys.argv)
 
-    def persist_simple(values: dict[str, float]) -> bool:
-        saved = settings_from_values(values, settings, reference, max_nits)
-        saved["UseToneCurve"] = False
-        saved = sanitize_settings(saved, reference, max_nits)
-        if commit_settings_dict(saved, session):
-            return True
-        show_error(
-            "AutoHDR could not apply settings via D-Bus.\n"
-            "Enable the AutoHDR effect in System Settings, reload KWin, then try again."
-        )
-        return False
-
     def persist_curve(curve_values: dict[str, object]) -> bool:
-        saved = settings_from_curve(curve_values, settings, reference, max_nits, use_tone_curve=True)
+        saved = settings_from_curve(curve_values, settings, reference, max_nits)
         if commit_settings_dict(saved, session):
             return True
         show_error(
@@ -1546,7 +1874,6 @@ def run_qt_form(
         reference,
         max_nits,
         session,
-        persist_simple,
         persist_curve,
     )
     result = dialog.exec()
@@ -1628,6 +1955,105 @@ def verify_tone_curve_invariants() -> None:
     lut = build_tone_curve_lut(curve, ref)
     assert len(lut) == 256
     assert abs(lut[62] - evaluate_tone_curve(curve, 50.0)) < 2.0
+
+    assert preset_from_string("linear") == PRESET_LINEAR
+    assert preset_from_string("SCURVE_BOOSTED") == PRESET_SCURVE_BOOSTED
+    assert preset_from_string("unknown") == PRESET_CUSTOM
+    assert preset_to_string(PRESET_EXPONENTIAL) == PRESET_EXPONENTIAL
+
+    linear_settings = {
+        "ReferenceNits": ref,
+        "MaxNits": peak,
+        "ToneCurvePreset": PRESET_LINEAR,
+    }
+    apply_tone_curve_preset(linear_settings)
+    assert linear_settings["ToneCurvePoints"] == ""
+    assert parse_sdr_max_point(str(linear_settings["SdrMaxPoint"]), (peak, peak)) == (ref, peak)
+
+    for preset in BUILT_IN_PRESETS:
+        if preset == PRESET_LINEAR:
+            continue
+        generated = generate_preset_intermediate_points(preset, ref, peak)
+        assert len(generated) == 3, f"{preset} should produce 3 intermediate knots"
+        ys = [y for _, y in generated]
+        assert ys == sorted(ys), f"{preset} intermediate outputs must be monotonic"
+        assert ys[-1] < peak, f"{preset} last knot must stay below peak endpoint"
+
+    boosted_settings = {
+        "ReferenceNits": ref,
+        "MaxNits": peak,
+        "ToneCurvePreset": PRESET_SCURVE_BOOSTED,
+    }
+    apply_tone_curve_preset(boosted_settings)
+    boosted_low_peak = {
+        "ReferenceNits": ref,
+        "MaxNits": 800.0,
+        "ToneCurvePreset": PRESET_SCURVE_BOOSTED,
+    }
+    apply_tone_curve_preset(boosted_low_peak)
+    boosted_low_points = parse_tone_curve_points(str(boosted_low_peak["ToneCurvePoints"]))
+    boosted_points = parse_tone_curve_points(str(boosted_settings["ToneCurvePoints"]))
+    assert abs(boosted_low_points[1][1] / 800.0 - boosted_points[1][1] / peak) < 0.05
+
+    detect_settings = {
+        "ReferenceNits": ref,
+        "MaxNits": peak,
+        "SdrMaxPoint": format_sdr_max_point((ref, peak)),
+        "ToneCurvePoints": boosted_settings["ToneCurvePoints"],
+    }
+    assert detect_matching_preset(detect_settings) == PRESET_SCURVE_BOOSTED
+
+    assert preset_from_string("user") == PRESET_USER
+
+    user_source = {
+        "ReferenceNits": ref,
+        "MaxNits": peak,
+        "SdrMaxPoint": format_sdr_max_point((ref, peak)),
+        "ToneCurvePoints": boosted_settings["ToneCurvePoints"],
+        "ToneCurvePreset": PRESET_CUSTOM,
+    }
+    normalized = normalize_current_curve(user_source)
+    normalized.id = "test_grade"
+    normalized.display_name = "Test Grade"
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as tmp:
+        tmp_cfg = Path(tmp.name)
+    try:
+        assert save_user_tone_curve_preset(tmp_cfg, normalized)
+        loaded = load_user_tone_curve_preset(tmp_cfg, "test_grade")
+        assert loaded is not None
+        assert loaded.display_name == "Test Grade"
+        assert len(loaded.normalized_points) == len(normalized.normalized_points)
+        for (ax, ay), (bx, by) in zip(normalized.normalized_points, loaded.normalized_points):
+            assert abs(ax - bx) < 1e-4 and abs(ay - by) < 1e-4
+        assert abs(loaded.sdr_max_fraction[0] - 1.0) < 1e-4
+        assert abs(loaded.sdr_max_fraction[1] - 1.0) < 1e-4
+
+        apply_settings = {
+            "ReferenceNits": ref,
+            "MaxNits": peak,
+            "ToneCurvePreset": PRESET_USER,
+            "ToneCurveUserPresetId": "test_grade",
+        }
+        apply_tone_curve_preset(apply_settings, tmp_cfg)
+        applied_points = parse_tone_curve_points(str(apply_settings["ToneCurvePoints"]))
+        source_points = parse_tone_curve_points(str(boosted_settings["ToneCurvePoints"]))
+        assert _points_match(applied_points, source_points, 2.0)
+
+        scaled_settings = {
+            "ReferenceNits": ref,
+            "MaxNits": 800.0,
+            "ToneCurvePreset": PRESET_USER,
+            "ToneCurveUserPresetId": "test_grade",
+        }
+        apply_tone_curve_preset(scaled_settings, tmp_cfg)
+        scaled_points = parse_tone_curve_points(str(scaled_settings["ToneCurvePoints"]))
+        assert abs(scaled_points[1][1] / 800.0 - source_points[1][1] / peak) < 0.05
+
+        assert delete_user_tone_curve_preset(tmp_cfg, "test_grade")
+        assert load_user_tone_curve_preset(tmp_cfg, "test_grade") is None
+    finally:
+        tmp_cfg.unlink(missing_ok=True)
 
     print("verify_tone_curve_invariants: ok")
 
