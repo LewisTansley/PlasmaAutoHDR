@@ -310,12 +310,11 @@ def sanitize_settings(settings: dict[str, object], reference: int, max_nits: int
 
 
 def migrate_legacy_settings(settings: dict[str, object], entries: dict[str, str]) -> None:
-    use_tone_curve = entries.get("UseToneCurve", "false").strip().lower() in {"true", "1", "yes", "on"}
     legacy_mid = migrate_midpoint(float(entries.get("MidPoint", settings.get("ReferenceNits", 203.0))))
     has_reference = "ReferenceNits" in entries
     has_sdr = "SdrMaxPoint" in entries or "MaxEndpointOutput" in entries
 
-    if not use_tone_curve or not has_reference or not has_sdr:
+    if not has_reference or not has_sdr:
         peak = float(settings["MaxNits"])
         ref = clamp_reference_nits(legacy_mid)
         settings["ReferenceNits"] = ref
@@ -325,10 +324,9 @@ def migrate_legacy_settings(settings: dict[str, object], entries: dict[str, str]
 
 
 def apply_tone_curve_preset_after_read(settings: dict[str, object], entries: dict[str, str]) -> None:
-    use_tone_curve = entries.get("UseToneCurve", "false").strip().lower() in {"true", "1", "yes", "on"}
     has_reference = "ReferenceNits" in entries
     has_sdr = "SdrMaxPoint" in entries or "MaxEndpointOutput" in entries
-    if not use_tone_curve or not has_reference or not has_sdr:
+    if not has_reference or not has_sdr:
         return
 
     if "ToneCurvePreset" in entries:
@@ -2054,6 +2052,22 @@ def verify_tone_curve_invariants() -> None:
         assert load_user_tone_curve_preset(tmp_cfg, "test_grade") is None
     finally:
         tmp_cfg.unlink(missing_ok=True)
+
+    saved_profile_entries = {
+        "ReferenceNits": "203",
+        "SdrMaxPoint": format_sdr_max_point((ref, peak)),
+        "ToneCurvePreset": PRESET_SCURVE,
+        "MaxNits": str(int(peak)),
+    }
+    round_trip = DEFAULT_SETTINGS.copy()
+    round_trip["MaxNits"] = peak
+    migrate_legacy_settings(round_trip, saved_profile_entries)
+    apply_tone_curve_preset_after_read(round_trip, saved_profile_entries)
+    assert round_trip["ToneCurvePreset"] == PRESET_SCURVE, (
+        f"expected {PRESET_SCURVE} without UseToneCurve, got {round_trip['ToneCurvePreset']}"
+    )
+    scurve_points = parse_tone_curve_points(str(round_trip["ToneCurvePoints"]))
+    assert len(scurve_points) == 3, f"S-Curve preset should produce 3 intermediate knots, got {scurve_points}"
 
     print("verify_tone_curve_invariants: ok")
 

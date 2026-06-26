@@ -163,7 +163,6 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.blackPoint = group.readEntry("BlackPoint", 0.0f);
     settings.vibrance = group.readEntry("Vibrance", 0.0f);
 
-    const bool useToneCurve = group.readEntry("UseToneCurve", false);
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
     settings.sdrMaxPoint = migrateSdrMaxPoint(group, settings.maxNits);
@@ -176,7 +175,7 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
         ? static_cast<float>(group.readEntry("ReferenceNits", qRound(legacyMidPoint)))
         : legacyMidPoint;
 
-    if (!useToneCurve || !hasReferenceNits || !hasSdrMaxPointKey) {
+    if (!hasReferenceNits || !hasSdrMaxPointKey) {
         seedToneCurveFromLegacy(settings, legacyMidPoint);
     } else if (group.hasKey(QStringLiteral("ToneCurvePreset"))) {
         settings.toneCurvePreset = presetFromString(group.readEntry("ToneCurvePreset"));
