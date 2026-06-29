@@ -389,6 +389,7 @@ namespace KWin {
         m_processingQuality = general.processingQuality;
         m_debandStrength = general.debandStrength;
         m_ditherStrength = general.ditherStrength;
+        m_postCurveDebandStrength = general.postCurveDebandStrength;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -476,6 +477,7 @@ namespace KWin {
         m_locChromaCompensation = m_shader->uniformLocation("chromaCompensation");
         m_locHighlightRolloff = m_shader->uniformLocation("highlightRolloff");
         m_locGamutMappingStrength = m_shader->uniformLocation("gamutMappingStrength");
+        m_locPostCurveDebandStrength = m_shader->uniformLocation("postCurveDebandStrength");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
@@ -511,6 +513,9 @@ namespace KWin {
         }
         if (m_locGamutMappingStrength >= 0) {
             m_shader->setUniform(m_locGamutMappingStrength, sanitized.gamutMappingStrength);
+        }
+        if (m_locPostCurveDebandStrength >= 0) {
+            m_shader->setUniform(m_locPostCurveDebandStrength, m_postCurveDebandStrength);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);

@@ -38,6 +38,7 @@ float clampGamutExpansion(float value);
 float clampChromaCompensation(float value);
 float clampHighlightRolloff(float value);
 float clampGamutMappingStrength(float value);
+float clampPostCurveDebandStrength(float value);
 
 struct AppProfileMetadata {
     QString key;
@@ -58,6 +59,7 @@ struct GeneralSettings {
     int processingQuality = 0;
     float debandStrength = 0.25f;
     float ditherStrength = 0.15f / 255.0f;
+    float postCurveDebandStrength = 0.0f;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

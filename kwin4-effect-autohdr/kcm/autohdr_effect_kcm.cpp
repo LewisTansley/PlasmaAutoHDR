@@ -127,6 +127,11 @@ public:
         m_ditherStrength->setSingleStep(0.001);
         processingLayout->addRow(i18n("Dither strength:"), m_ditherStrength);
 
+        m_postCurveDebandStrength = new QDoubleSpinBox(processingGroup);
+        m_postCurveDebandStrength->setRange(0.0, 1.0);
+        m_postCurveDebandStrength->setSingleStep(0.05);
+        processingLayout->addRow(i18n("Post-curve deband:"), m_postCurveDebandStrength);
+
         layout->addWidget(processingGroup);
 
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
@@ -152,6 +157,8 @@ public:
         connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                &KCModule::markAsChanged);
     }
 
     void load() override
@@ -181,6 +188,7 @@ public:
         m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
         m_debandStrength->setValue(general.debandStrength);
         m_ditherStrength->setValue(general.ditherStrength);
+        m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
 
         rebuildAppsTable();
     }
@@ -229,6 +237,7 @@ public:
         general.processingQuality = m_processingQuality->currentData().toInt();
         general.debandStrength = static_cast<float>(m_debandStrength->value());
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
+        general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -308,6 +317,7 @@ private:
     QComboBox *m_processingQuality = nullptr;
     QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
+    QDoubleSpinBox *m_postCurveDebandStrength = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;

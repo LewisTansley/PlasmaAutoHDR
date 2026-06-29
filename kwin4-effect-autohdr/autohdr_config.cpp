@@ -43,6 +43,11 @@ float clampGamutMappingStrength(float value)
     return qBound(0.0f, value, 1.0f);
 }
 
+float clampPostCurveDebandStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
 namespace {
 
 QPointF migrateSdrMaxPoint(const KConfigGroup &group, float peakNits)
@@ -163,6 +168,8 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     general.processingQuality = qBound(0, group.readEntry("ProcessingQuality", 0), 2);
     general.debandStrength = qBound(0.0f, static_cast<float>(group.readEntry("DebandStrength", 0.25)), 1.0f);
     general.ditherStrength = qBound(0.0f, static_cast<float>(group.readEntry("DitherStrength", 0.15 / 255.0)), 1.0f);
+    general.postCurveDebandStrength =
+        qBound(0.0f, static_cast<float>(group.readEntry("PostCurveDebandStrength", 0.0)), 1.0f);
     return general;
 }
 
@@ -173,6 +180,7 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("ProcessingQuality", general.processingQuality);
     group.writeEntry("DebandStrength", general.debandStrength);
     group.writeEntry("DitherStrength", general.ditherStrength);
+    group.writeEntry("PostCurveDebandStrength", general.postCurveDebandStrength);
     config->sync();
 }
 

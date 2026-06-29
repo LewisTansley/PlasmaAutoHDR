@@ -234,6 +234,21 @@ vec3 debandNeighbors(vec3 centerRel, vec3 neighborRel, float strength)
     return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
 }
 
+float isPostCurveBandStep(float delta, float refNits)
+{
+    float bandStep = max(refNits * 0.001, 1.0) / max(refNits, 1.0);
+    float d = abs(delta);
+    return step(bandStep * 0.5, d) * (1.0 - step(bandStep * 1.5, d));
+}
+
+vec3 debandPostCurve(vec3 centerRel, vec3 neighborRel, float strength, float refNits)
+{
+    float band = isPostCurveBandStep(neighborRel.r - centerRel.r, refNits)
+               * isPostCurveBandStep(neighborRel.g - centerRel.g, refNits)
+               * isPostCurveBandStep(neighborRel.b - centerRel.b, refNits);
+    return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength * 0.5);
+}
+
 float ign(vec2 p)
 {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));

@@ -11,6 +11,7 @@ uniform float gamutExpansion;
 uniform float chromaCompensation;
 uniform float highlightRolloff;
 uniform float gamutMappingStrength;
+uniform float postCurveDebandStrength;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -117,6 +118,66 @@ vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, 
     return accum / count;
 }
 
+vec3 decodeToNits(vec4 tex, float ref, float sourceWhite)
+{
+    tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                         sourceTransferFunctionParams.y);
+    tex.rgb = (colorimetryTransform * vec4(tex.rgb, 1.0)).rgb;
+    tex.rgb *= ref / sourceWhite;
+    float alpha = max(tex.a, 0.001);
+    return tex.rgb / alpha;
+}
+
+vec3 toneMapDecodedNits(vec3 rgb, float ref, float curveRef, float curveSpan, float blackPoint)
+{
+    rgb = reconstructHighlights(rgb, ref);
+
+    float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
+    float t = lumaNits / ref;
+    t = adaptiveShadowRolloff(t, minDisplayNits, ref);
+    t = applyUserBlackPoint(t, blackPoint);
+
+    float correctedNits = t * curveRef;
+    float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
+    return applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
+}
+
+vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float sourceWhite, float curveRef, float curveSpan,
+                          float blackPoint)
+{
+    return toneMapDecodedNits(decodeToNits(texture(tex, uv), ref, sourceWhite), ref, curveRef, curveSpan, blackPoint);
+}
+
+vec3 debandPostCurveNits(sampler2D tex, vec2 texcoord, vec3 centerNits, float strength, ivec2 texSize, float ref,
+                         float sourceWhite, float curveRef, float curveSpan, float blackPoint)
+{
+    if (strength <= 0.0) {
+        return centerNits;
+    }
+
+    vec3 centerRel = centerNits / ref;
+    ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+    vec3 accum = centerRel;
+    float count = 1.0;
+
+    const ivec2 offsets[4] = ivec2[4](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)
+    );
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
+        vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
+        vec3 neighborNits = sampleToneMappedNits(tex, nuv, ref, sourceWhite, curveRef, curveSpan, blackPoint);
+        vec3 neighborRel = neighborNits / ref;
+        vec3 blended = debandPostCurve(centerRel, neighborRel, strength, ref);
+        float band = step(0.001, length(blended - centerRel));
+        accum += blended;
+        count += band;
+    }
+
+    return (accum / count) * ref;
+}
+
 void main()
 {
     vec4 tex = texture(sampler, texcoord0);
@@ -154,6 +215,13 @@ void main()
     float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
     rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
     rgb = autohdrApplyChromaCompensation(rgb, Yn, lumaNits, chromaCompensation);
+
+    float postDeband = postCurveDebandStrength;
+    if (postDeband > 0.0 && textureWidth > 0 && textureHeight > 0) {
+        ivec2 texSize = ivec2(textureWidth, textureHeight);
+        rgb = debandPostCurveNits(sampler, texcoord0, rgb, postDeband, texSize, ref, sourceWhite, curveRef,
+                                  curveSpan, blackPoint);
+    }
 
     if (gamutExpansion > 0.0) {
         rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
