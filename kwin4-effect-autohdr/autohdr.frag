@@ -13,6 +13,7 @@ uniform float highlightRolloff;
 uniform float gamutMappingStrength;
 uniform float postCurveDebandStrength;
 uniform int captureUsesFloat;
+uniform float spatialHighlightRecovery;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -206,7 +207,13 @@ void main()
         rgb = centerRel * ref;
     }
 
-    rgb = reconstructHighlights(rgb, ref);
+    ivec2 texSize = ivec2(textureWidth, textureHeight);
+    if (spatialHighlightRecovery > 0.0 && texSize.x > 0 && texSize.y > 0) {
+        rgb = reconstructHighlightsSpatial(sampler, texcoord0, rgb, ref, texSize, sourceWhite,
+                                           spatialHighlightRecovery, captureUsesFloat);
+    } else {
+        rgb = reconstructHighlights(rgb, ref);
+    }
 
     float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;

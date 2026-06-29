@@ -170,6 +170,7 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     general.ditherStrength = qBound(0.0f, static_cast<float>(group.readEntry("DitherStrength", 0.15 / 255.0)), 1.0f);
     general.postCurveDebandStrength =
         qBound(0.0f, static_cast<float>(group.readEntry("PostCurveDebandStrength", 0.0)), 1.0f);
+    general.spatialHighlightRecovery = group.readEntry("SpatialHighlightRecovery", false);
     return general;
 }
 
@@ -181,6 +182,7 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("DebandStrength", general.debandStrength);
     group.writeEntry("DitherStrength", general.ditherStrength);
     group.writeEntry("PostCurveDebandStrength", general.postCurveDebandStrength);
+    group.writeEntry("SpatialHighlightRecovery", general.spatialHighlightRecovery);
     config->sync();
 }
 

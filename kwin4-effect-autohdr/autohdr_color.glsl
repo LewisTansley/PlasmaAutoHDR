@@ -148,6 +148,60 @@ vec3 reconstructHighlights(vec3 rgbNits, float refNits)
     return mix(rel, reconstructed, clipMask) * refNits;
 }
 
+vec3 reconstructHighlightsSpatial(sampler2D tex, vec2 texcoord, vec3 rgbNits, float refNits, ivec2 texSize,
+                                  float sourceWhite, float strength, int captureUsesFloat)
+{
+    vec3 base = reconstructHighlights(rgbNits, refNits);
+    if (strength <= 0.0 || texSize.x <= 0 || texSize.y <= 0) {
+        return base;
+    }
+
+    vec3 rel = rgbNits / max(refNits, 1.0);
+    float peak = max(max(rel.r, rel.g), rel.b);
+    if (peak <= 0.98) {
+        return base;
+    }
+
+    ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+    vec3 hueAccum = vec3(0.0);
+    float weight = 0.0;
+
+    const ivec2 offsets[8] = ivec2[8](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+        ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1)
+    );
+
+    for (int i = 0; i < 8; ++i) {
+        ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
+        vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
+        vec4 nSample = texture(tex, nuv);
+        if (captureUsesFloat == 0) {
+            nSample = clamp(nSample, 0.0, 1.0);
+        }
+        nSample = encodingToNits(nSample, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                               sourceTransferFunctionParams.y);
+        nSample.rgb = (colorimetryTransform * vec4(nSample.rgb, 1.0)).rgb;
+        nSample.rgb *= refNits / max(sourceWhite, 1.0);
+        vec3 nRel = nSample.rgb / max(nSample.a, 0.001) / refNits;
+        float nPeak = max(max(nRel.r, nRel.g), nRel.b);
+        if (nPeak < 0.95) {
+            vec3 hue = nRel / max(nPeak, 1e-4);
+            hueAccum += hue;
+            weight += 1.0;
+        }
+    }
+
+    if (weight <= 0.0) {
+        return base;
+    }
+
+    vec3 avgHue = hueAccum / weight;
+    float luma = dot(rel, AUTOHDR_LUMA);
+    vec3 spatial = avgHue * luma;
+    float clipMask = smoothstep(0.95, 0.99, peak);
+    return mix(base, spatial * refNits, clipMask * strength * 0.5);
+}
+
 vec3 autohdrRec709ToXYZ(vec3 linearRec709)
 {
     return vec3(

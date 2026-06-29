@@ -132,6 +132,10 @@ public:
         m_postCurveDebandStrength->setSingleStep(0.05);
         processingLayout->addRow(i18n("Post-curve deband:"), m_postCurveDebandStrength);
 
+        m_spatialHighlightRecovery = new QCheckBox(
+            i18n("Enable spatial highlight recovery (experimental)"), processingGroup);
+        processingLayout->addRow(m_spatialHighlightRecovery);
+
         layout->addWidget(processingGroup);
 
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
@@ -159,6 +163,7 @@ public:
         connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
+        connect(m_spatialHighlightRecovery, &QCheckBox::toggled, this, &KCModule::markAsChanged);
     }
 
     void load() override
@@ -189,6 +194,7 @@ public:
         m_debandStrength->setValue(general.debandStrength);
         m_ditherStrength->setValue(general.ditherStrength);
         m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
+        m_spatialHighlightRecovery->setChecked(general.spatialHighlightRecovery);
 
         rebuildAppsTable();
     }
@@ -238,6 +244,7 @@ public:
         general.debandStrength = static_cast<float>(m_debandStrength->value());
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
         general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
+        general.spatialHighlightRecovery = m_spatialHighlightRecovery->isChecked();
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -318,6 +325,7 @@ private:
     QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
     QDoubleSpinBox *m_postCurveDebandStrength = nullptr;
+    QCheckBox *m_spatialHighlightRecovery = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;

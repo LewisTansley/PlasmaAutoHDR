@@ -60,6 +60,7 @@ struct GeneralSettings {
     float debandStrength = 0.25f;
     float ditherStrength = 0.15f / 255.0f;
     float postCurveDebandStrength = 0.0f;
+    bool spatialHighlightRecovery = false;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

@@ -133,6 +133,7 @@ namespace KWin {
         int m_locGamutMappingStrength = -1;
         int m_locPostCurveDebandStrength = -1;
         int m_locCaptureUsesFloat = -1;
+        int m_locSpatialHighlightRecovery = -1;
         int m_locBlackPoint = -1;
         int m_locColorVibrance = -1;
         int m_locToneCurveInputSpan = -1;
@@ -155,6 +156,7 @@ namespace KWin {
         float m_ditherStrength = 0.15f / 255.0f;
         float m_postCurveDebandStrength = 0.0f;
         int m_captureUsesFloat = 0;
+        float m_spatialHighlightRecovery = 0.0f;
 
         QString m_shaderPath;
         QDateTime m_shaderFragMtime;

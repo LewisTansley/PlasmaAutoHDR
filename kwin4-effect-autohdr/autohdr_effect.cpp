@@ -390,6 +390,7 @@ namespace KWin {
         m_debandStrength = general.debandStrength;
         m_ditherStrength = general.ditherStrength;
         m_postCurveDebandStrength = general.postCurveDebandStrength;
+        m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -479,6 +480,7 @@ namespace KWin {
         m_locGamutMappingStrength = m_shader->uniformLocation("gamutMappingStrength");
         m_locPostCurveDebandStrength = m_shader->uniformLocation("postCurveDebandStrength");
         m_locCaptureUsesFloat = m_shader->uniformLocation("captureUsesFloat");
+        m_locSpatialHighlightRecovery = m_shader->uniformLocation("spatialHighlightRecovery");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
@@ -521,6 +523,9 @@ namespace KWin {
         }
         if (m_locCaptureUsesFloat >= 0) {
             m_shader->setUniform(m_locCaptureUsesFloat, m_captureUsesFloat);
+        }
+        if (m_locSpatialHighlightRecovery >= 0) {
+            m_shader->setUniform(m_locSpatialHighlightRecovery, m_spatialHighlightRecovery);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);
