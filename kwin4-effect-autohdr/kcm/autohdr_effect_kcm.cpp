@@ -29,7 +29,6 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSlider>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -39,7 +38,6 @@ namespace {
 struct HdrDisplayLimits {
     int referenceNits = 100;
     int maxDisplayNits = 1000;
-    int minDisplayNits = 0;
 };
 
 HdrDisplayLimits readHdrDisplayLimits()
@@ -48,7 +46,6 @@ HdrDisplayLimits readHdrDisplayLimits()
     HdrDisplayLimits limits;
     limits.referenceNits = qMax(1, qRound(hdrGroup.readEntry("Reference", 100.0f)));
     limits.maxDisplayNits = qMax(limits.referenceNits + 1, qRound(hdrGroup.readEntry("MaxLuminance", 1000.0f)));
-    limits.minDisplayNits = qMax(0, qRound(hdrGroup.readEntry("MinLuminance", 0.0f)));
 
     const QString outputConfigPath =
         QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/kwinoutputconfig.json");
@@ -65,10 +62,6 @@ HdrDisplayLimits readHdrDisplayLimits()
                 const int peakOverride = output.value(QStringLiteral("maxPeakBrightnessOverride")).toInt(0);
                 if (peakOverride > limits.maxDisplayNits) {
                     limits.maxDisplayNits = peakOverride;
-                }
-                const int minOverride = output.value(QStringLiteral("minLuminance")).toInt(0);
-                if (minOverride > limits.minDisplayNits) {
-                    limits.minDisplayNits = minOverride;
                 }
             }
         }
@@ -114,8 +107,9 @@ QJsonObject profileToJson(const AutoHdr::AppProfile &profile)
     settings.insert(QStringLiteral("BlackPoint"), static_cast<double>(s.blackPoint));
     settings.insert(QStringLiteral("Vibrance"), static_cast<double>(s.vibrance));
     settings.insert(QStringLiteral("ReferenceNits"), static_cast<double>(s.referenceNits));
-    settings.insert(QStringLiteral("HighlightRolloff"), static_cast<double>(s.highlightRolloff));
     settings.insert(QStringLiteral("ChromaCompensation"), static_cast<double>(s.chromaCompensation));
+    settings.insert(QStringLiteral("HighlightRolloff"), static_cast<double>(s.highlightRolloff));
+    settings.insert(QStringLiteral("GamutMappingStrength"), static_cast<double>(s.gamutMappingStrength));
     settings.insert(QStringLiteral("SdrMaxPoint"), AutoHdr::formatSdrMaxPoint(s.sdrMaxPoint));
     settings.insert(QStringLiteral("ToneCurvePoints"), AutoHdr::formatToneCurvePoints(s.toneCurvePoints));
     settings.insert(QStringLiteral("ToneCurvePreset"), AutoHdr::presetToString(s.toneCurvePreset));
@@ -149,9 +143,12 @@ std::optional<AutoHdr::AppProfile> profileFromJson(const QJsonObject &root)
     profile.settings.blackPoint = static_cast<float>(settings.value(QStringLiteral("BlackPoint")).toDouble(0.0));
     profile.settings.vibrance = static_cast<float>(settings.value(QStringLiteral("Vibrance")).toDouble(0.0));
     profile.settings.referenceNits = static_cast<float>(settings.value(QStringLiteral("ReferenceNits")).toDouble(203.0));
-    profile.settings.highlightRolloff = static_cast<float>(settings.value(QStringLiteral("HighlightRolloff")).toDouble(0.5));
     profile.settings.chromaCompensation =
-        static_cast<float>(settings.value(QStringLiteral("ChromaCompensation")).toDouble(0.7));
+        static_cast<float>(settings.value(QStringLiteral("ChromaCompensation")).toDouble(0.0));
+    profile.settings.highlightRolloff =
+        static_cast<float>(settings.value(QStringLiteral("HighlightRolloff")).toDouble(0.0));
+    profile.settings.gamutMappingStrength =
+        static_cast<float>(settings.value(QStringLiteral("GamutMappingStrength")).toDouble(0.0));
     profile.settings.sdrMaxPoint =
         AutoHdr::parseSdrMaxPoint(settings.value(QStringLiteral("SdrMaxPoint")).toString(), QPointF());
     profile.settings.toneCurvePoints =
@@ -192,8 +189,12 @@ public:
         m_processingQuality->addItem(i18n("Quality"), 2);
         processingLayout->addRow(i18n("Processing quality:"), m_processingQuality);
 
-        m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture (recommended)"), processingGroup);
+        m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture"), processingGroup);
         processingLayout->addRow(m_preferFloatCapture);
+
+        m_useReferenceToneCurve = new QCheckBox(
+            i18n("Reference-aware tone curve (maps SDR white to calibration reference nits)"), processingGroup);
+        processingLayout->addRow(m_useReferenceToneCurve);
 
         m_debandStrength = new QDoubleSpinBox(processingGroup);
         m_debandStrength->setRange(0.0, 1.0);
@@ -206,16 +207,14 @@ public:
         m_ditherStrength->setSingleStep(0.001);
         processingLayout->addRow(i18n("Dither strength:"), m_ditherStrength);
 
-        m_hdrFocusDimming = new QCheckBox(i18n("Dim non-AutoHDR windows when an AutoHDR window is focused"),
-                                          processingGroup);
-        processingLayout->addRow(m_hdrFocusDimming);
+        m_postCurveDebandStrength = new QDoubleSpinBox(processingGroup);
+        m_postCurveDebandStrength->setRange(0.0, 1.0);
+        m_postCurveDebandStrength->setSingleStep(0.05);
+        processingLayout->addRow(i18n("Post-curve deband:"), m_postCurveDebandStrength);
 
-        auto *referenceNote = new QLabel(
-            i18n("Match reference nits to your Plasma HDR reference (System Settings → Display) for seamless blending "
-                 "with the desktop shell."),
-            processingGroup);
-        referenceNote->setWordWrap(true);
-        processingLayout->addRow(referenceNote);
+        m_spatialHighlightRecovery = new QCheckBox(
+            i18n("Enable spatial highlight recovery (experimental)"), processingGroup);
+        processingLayout->addRow(m_spatialHighlightRecovery);
 
         layout->addWidget(processingGroup);
 
@@ -247,12 +246,14 @@ public:
 
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
-        connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                &KCModule::markAsChanged);
+        connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_preferFloatCapture, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_useReferenceToneCurve, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_hdrFocusDimming, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                &KCModule::markAsChanged);
+        connect(m_spatialHighlightRecovery, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(importButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::importProfile);
         connect(exportButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::exportProfile);
     }
@@ -265,23 +266,27 @@ public:
         m_toneCurveEditor->setHdrLimits(limits.referenceNits + 1, limits.maxDisplayNits);
 
         m_config->reparseConfiguration();
-        const AutoHdr::CalibrationSettings globals = AutoHdr::loadGlobalSettings(
-            m_config, static_cast<float>(limits.maxDisplayNits), static_cast<float>(limits.referenceNits));
+        const AutoHdr::CalibrationSettings globals =
+            AutoHdr::loadGlobalSettings(m_config, static_cast<float>(limits.maxDisplayNits));
 
         m_toneCurveEditor->setConfig(m_config);
 
         m_toneCurveEditor->setValues(globals.maxNits, globals.referenceNits, globals.sdrMaxPoint,
                                      globals.toneCurvePoints, globals.blackPoint, globals.toneCurvePreset,
-                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion);
+                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion,
+                                     globals.chromaCompensation, globals.highlightRolloff,
+                                     globals.gamutMappingStrength);
 
         const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
         m_autoActivate->setChecked(general.autoActivateCalibrated);
-        m_preferFloatCapture->setChecked(general.preferFloatCapture);
-        m_debandStrength->setValue(general.debandStrength);
-        m_ditherStrength->setValue(general.ditherStrength);
-        m_hdrFocusDimming->setChecked(general.hdrFocusDimming);
         const int qualityIndex = m_processingQuality->findData(general.processingQuality);
         m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
+        m_preferFloatCapture->setChecked(general.preferFloatCapture);
+        m_useReferenceToneCurve->setChecked(general.useReferenceToneCurve);
+        m_debandStrength->setValue(general.debandStrength);
+        m_ditherStrength->setValue(general.ditherStrength);
+        m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
+        m_spatialHighlightRecovery->setChecked(general.spatialHighlightRecovery);
 
         rebuildAppsTable();
     }
@@ -290,22 +295,29 @@ public:
     {
         const HdrDisplayLimits limits = readHdrDisplayLimits();
 
-        AutoHdr::CalibrationSettings globals = AutoHdr::loadGlobalSettings(
-            m_config, static_cast<float>(limits.maxDisplayNits), static_cast<float>(limits.referenceNits));
+        AutoHdr::CalibrationSettings globals =
+            AutoHdr::loadGlobalSettings(m_config, static_cast<float>(limits.maxDisplayNits));
 
         float peakNits = 0.0f;
         float referenceNits = 0.0f;
         float blackPoint = 0.0f;
         float vibrance = 0.0f;
         float gamutExpansion = 1.5f;
+        float chromaCompensation = 0.0f;
+        float highlightRolloff = 0.0f;
+        float gamutMappingStrength = 0.0f;
         QPointF sdrMaxPoint;
         QVector<QPointF> intermediatePoints;
         AutoHdr::ToneCurvePreset toneCurvePreset = AutoHdr::ToneCurvePreset::Linear;
         QString toneCurveUserPresetId;
         m_toneCurveEditor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints, blackPoint,
-                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion);
+                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion,
+                                     chromaCompensation, highlightRolloff, gamutMappingStrength);
         globals.vibrance = vibrance;
         globals.gamutExpansion = gamutExpansion;
+        globals.chromaCompensation = chromaCompensation;
+        globals.highlightRolloff = highlightRolloff;
+        globals.gamutMappingStrength = gamutMappingStrength;
         globals.maxNits = peakNits;
         globals.referenceNits = referenceNits;
         globals.sdrMaxPoint = sdrMaxPoint;
@@ -320,11 +332,13 @@ public:
 
         AutoHdr::GeneralSettings general;
         general.autoActivateCalibrated = m_autoActivate->isChecked();
-        general.preferFloatCapture = m_preferFloatCapture->isChecked();
         general.processingQuality = m_processingQuality->currentData().toInt();
+        general.preferFloatCapture = m_preferFloatCapture->isChecked();
+        general.useReferenceToneCurve = m_useReferenceToneCurve->isChecked();
         general.debandStrength = static_cast<float>(m_debandStrength->value());
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
-        general.hdrFocusDimming = m_hdrFocusDimming->isChecked();
+        general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
+        general.spatialHighlightRecovery = m_spatialHighlightRecovery->isChecked();
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -355,7 +369,11 @@ private Q_SLOTS:
             return;
         }
 
-        AutoHdr::saveAppProfile(m_config, *profile);
+        AutoHdr::AppProfile imported = *profile;
+        const HdrDisplayLimits limits = readHdrDisplayLimits();
+        AutoHdr::sanitizeCalibrationSettings(imported.settings, static_cast<float>(limits.referenceNits),
+                                            static_cast<float>(limits.maxDisplayNits), m_config);
+        AutoHdr::saveAppProfile(m_config, imported);
         rebuildAppsTable();
         markAsChanged();
     }
@@ -457,11 +475,13 @@ private:
 
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
-    QCheckBox *m_preferFloatCapture = nullptr;
-    QCheckBox *m_hdrFocusDimming = nullptr;
     QComboBox *m_processingQuality = nullptr;
+    QCheckBox *m_preferFloatCapture = nullptr;
+    QCheckBox *m_useReferenceToneCurve = nullptr;
     QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
+    QDoubleSpinBox *m_postCurveDebandStrength = nullptr;
+    QCheckBox *m_spatialHighlightRecovery = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;

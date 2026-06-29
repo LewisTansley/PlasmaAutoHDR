@@ -165,6 +165,7 @@ namespace KWin {
     {
         Q_UNUSED(flags)
         m_config->reparseConfiguration();
+        m_redirectInternalFormat = 0;
         loadGlobalDefaults(false);
         reevaluateAllWindows();
     }
@@ -383,12 +384,17 @@ namespace KWin {
         m_config->reparseConfiguration();
         reloadHdrDisplayLimits();
 
-        m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits, m_hdrReferenceNits);
-        m_generalSettings = AutoHdr::loadGeneralSettings(m_config);
-        m_autoActivateCalibrated = m_generalSettings.autoActivateCalibrated;
+        m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits);
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivateCalibrated = general.autoActivateCalibrated;
+        m_processingQuality = general.processingQuality;
+        m_debandStrength = general.debandStrength;
+        m_ditherStrength = general.ditherStrength;
+        m_postCurveDebandStrength = general.postCurveDebandStrength;
+        m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
+        m_preferFloatCapture = general.preferFloatCapture;
+        m_useReferenceToneCurve = general.useReferenceToneCurve;
         sanitizeGlobalDefaults(persistSanitize);
-        m_redirectFormatProbed = false;
-        m_redirectInternalFormat = 0;
         loadShader();
     }
 
@@ -435,11 +441,18 @@ namespace KWin {
         const AutoHdr::ToneCurveEndpoints endpoints =
             AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
         const QVector<QPointF> fullCurve = AutoHdr::buildFullCurve(endpoints, sanitized.toneCurvePoints);
-        const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
-        m_cachedToneCurveInputSpan = inputSpan;
-        m_cachedToneCurveReferenceNits = sanitized.referenceNits;
-        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
-                                   AutoHdr::kToneCurveLutSize);
+        if (m_useReferenceToneCurve) {
+            const float inputSpan = qMax(endpoints.peakNits, qMax(endpoints.visualReferenceNits, 1.0f));
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = sanitized.referenceNits;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
+                                       AutoHdr::kToneCurveLutSize);
+        } else {
+            const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = 0.0f;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, 0.0f, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        }
         m_toneCurveLutDirty = true;
     }
 
@@ -472,10 +485,14 @@ namespace KWin {
 
         ShaderBinder binder(m_shader.get());
         m_locGamutExpansion = m_shader->uniformLocation("gamutExpansion");
+        m_locChromaCompensation = m_shader->uniformLocation("chromaCompensation");
+        m_locHighlightRolloff = m_shader->uniformLocation("highlightRolloff");
+        m_locGamutMappingStrength = m_shader->uniformLocation("gamutMappingStrength");
+        m_locPostCurveDebandStrength = m_shader->uniformLocation("postCurveDebandStrength");
+        m_locCaptureUsesFloat = m_shader->uniformLocation("captureUsesFloat");
+        m_locSpatialHighlightRecovery = m_shader->uniformLocation("spatialHighlightRecovery");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
-        m_locHighlightRolloff = m_shader->uniformLocation("highlightRolloff");
-        m_locChromaCompensation = m_shader->uniformLocation("chromaCompensation");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
         m_locToneCurveReferenceNits = m_shader->uniformLocation("toneCurveReferenceNits");
         m_locMinDisplayNits = m_shader->uniformLocation("minDisplayNits");
@@ -498,8 +515,27 @@ namespace KWin {
         AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
 
         ShaderBinder binder(m_shader.get());
+        m_captureUsesFloat = redirectInternalFormat() == GL_RGBA16F ? 1 : 0;
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
+        }
+        if (m_locChromaCompensation >= 0) {
+            m_shader->setUniform(m_locChromaCompensation, sanitized.chromaCompensation);
+        }
+        if (m_locHighlightRolloff >= 0) {
+            m_shader->setUniform(m_locHighlightRolloff, sanitized.highlightRolloff);
+        }
+        if (m_locGamutMappingStrength >= 0) {
+            m_shader->setUniform(m_locGamutMappingStrength, sanitized.gamutMappingStrength);
+        }
+        if (m_locPostCurveDebandStrength >= 0) {
+            m_shader->setUniform(m_locPostCurveDebandStrength, m_postCurveDebandStrength);
+        }
+        if (m_locCaptureUsesFloat >= 0) {
+            m_shader->setUniform(m_locCaptureUsesFloat, m_captureUsesFloat);
+        }
+        if (m_locSpatialHighlightRecovery >= 0) {
+            m_shader->setUniform(m_locSpatialHighlightRecovery, m_spatialHighlightRecovery);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);
@@ -507,23 +543,17 @@ namespace KWin {
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
         }
-        if (m_locHighlightRolloff >= 0) {
-            m_shader->setUniform(m_locHighlightRolloff, sanitized.highlightRolloff);
-        }
-        if (m_locChromaCompensation >= 0) {
-            m_shader->setUniform(m_locChromaCompensation, sanitized.chromaCompensation);
-        }
         if (m_locMinDisplayNits >= 0) {
             m_shader->setUniform(m_locMinDisplayNits, m_hdrMinDisplayNits);
         }
         if (m_locDebandStrength >= 0) {
-            m_shader->setUniform(m_locDebandStrength, m_generalSettings.debandStrength);
+            m_shader->setUniform(m_locDebandStrength, m_debandStrength);
         }
         if (m_locDitherStrength >= 0) {
-            m_shader->setUniform(m_locDitherStrength, m_generalSettings.ditherStrength);
+            m_shader->setUniform(m_locDitherStrength, m_ditherStrength);
         }
         if (m_locProcessingQuality >= 0) {
-            m_shader->setUniform(m_locProcessingQuality, m_generalSettings.processingQuality);
+            m_shader->setUniform(m_locProcessingQuality, m_processingQuality);
         }
 
         uploadToneCurveUniforms();
@@ -600,18 +630,17 @@ namespace KWin {
 
     GLenum AutoHDREffect::redirectInternalFormat() const
     {
-        if (m_redirectFormatProbed) {
+        if (m_redirectInternalFormat != 0) {
             return m_redirectInternalFormat;
         }
 
-        m_redirectFormatProbed = true;
         m_redirectInternalFormat = GL_RGBA8;
 
         const bool forceFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
             && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") != 0;
         const bool force8Bit = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
             && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") == 0;
-        const bool preferFloat = !force8Bit && (forceFloat || m_generalSettings.preferFloatCapture);
+        const bool preferFloat = !force8Bit && (forceFloat || m_preferFloatCapture);
 
         if (preferFloat) {
             if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
@@ -655,12 +684,10 @@ namespace KWin {
         auto data = std::make_unique<OffscreenWindowData>();
         data->windowEffect = ItemEffect(window->windowItem());
         data->windowDamagedConnection =
-            connect(window, &EffectWindow::windowDamaged, this, [this, window](EffectWindow *w) {
-                Q_UNUSED(w)
+            connect(window, &EffectWindow::windowDamaged, this, [this, window]() {
                 const auto it = m_offscreenWindows.find(window);
                 if (it != m_offscreenWindows.end()) {
                     it->second->isDirty = true;
-                    it->second->fullRedraw = true;
                 }
             });
 
@@ -714,9 +741,7 @@ namespace KWin {
             offscreenData->texture->setFilter(GL_LINEAR);
             offscreenData->texture->setWrapMode(GL_CLAMP_TO_EDGE);
             offscreenData->fbo = std::make_unique<GLFramebuffer>(offscreenData->texture.get());
-            offscreenData->prevFrameTexture.reset();
             offscreenData->isDirty = true;
-            offscreenData->fullRedraw = true;
         }
 
         if (!offscreenData->isDirty) {
@@ -726,40 +751,17 @@ namespace KWin {
         RenderTarget renderTarget(offscreenData->fbo.get(), ColorDescription::sRGB);
         RenderViewport viewport(logicalGeometry, scale, renderTarget, QPoint());
         GLFramebuffer::pushFramebuffer(offscreenData->fbo.get());
-
-        const bool partialUpdate = !offscreenData->fullRedraw && !offscreenData->damageRegion.isEmpty();
-        Region deviceDamage;
-        if (partialUpdate) {
-            deviceDamage = offscreenData->damageRegion;
-            deviceDamage.translate(-window->x(), -window->y());
-            deviceDamage = viewport.transform().map(deviceDamage, renderTarget.transformedSize());
-            glEnable(GL_SCISSOR_TEST);
-            for (const Rect &rect : deviceDamage.rects()) {
-                glScissor(rect.x(), renderTarget.transformedSize().height() - rect.y() - rect.height(), rect.width(),
-                          rect.height());
-                glClearColor(0.0, 0.0, 0.0, 0.0);
-                glClear(GL_COLOR_BUFFER_BIT);
-            }
-        } else {
-            glClearColor(0.0, 0.0, 0.0, 0.0);
-            glClear(GL_COLOR_BUFFER_BIT);
-        }
+        glClearColor(0.0, 0.0, 0.0, 0.0);
+        glClear(GL_COLOR_BUFFER_BIT);
 
         WindowPaintData paintData;
         paintData.setOpacity(1.0);
 
         const int mask = Effect::PAINT_WINDOW_TRANSFORMED | Effect::PAINT_WINDOW_TRANSLUCENT;
-        const Region paintRegion = partialUpdate ? offscreenData->damageRegion : Region::infinite();
-        effects->drawWindow(renderTarget, viewport, window, mask, paintRegion, paintData);
-
-        if (partialUpdate) {
-            glDisable(GL_SCISSOR_TEST);
-        }
+        effects->drawWindow(renderTarget, viewport, window, mask, Region::infinite(), paintData);
 
         GLFramebuffer::popFramebuffer();
         offscreenData->isDirty = false;
-        offscreenData->fullRedraw = false;
-        offscreenData->damageRegion = Region();
     }
 
     void AutoHDREffect::paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
@@ -866,9 +868,6 @@ namespace KWin {
 
         if (!m_offscreenWindows.contains(window)) {
             redirect(window);
-        } else {
-            m_offscreenWindows[window]->fullRedraw = true;
-            m_offscreenWindows[window]->isDirty = true;
         }
         window->addRepaintFull();
         return true;
@@ -970,13 +969,6 @@ namespace KWin {
     void AutoHDREffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport,
                                    EffectWindow *window, int mask, const Region &deviceRegion, WindowPaintData &data)
     {
-        if (m_generalSettings.hdrFocusDimming && !m_activeWindows.isEmpty()) {
-            EffectWindow *focused = effects->activeWindow();
-            if (focused && m_activeWindows.contains(focused) && !m_activeWindows.contains(window)) {
-                data.multiplyBrightness(0.85);
-            }
-        }
-
         auto it = m_offscreenWindows.find(window);
         if (it == m_offscreenWindows.end()) {
             effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);

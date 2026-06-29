@@ -54,46 +54,6 @@ float exponentialMapping(float t)
     return (std::exp(k * t) - 1.0f) / denom;
 }
 
-// BT.2446-1 Method A/B approximations for SDR-to-HDR luminance mapping.
-float bt2446MethodA(float inputNits, float referenceNits, float peakNits)
-{
-    const float ref = qMax(referenceNits, 1e-3f);
-    const float peak = qMax(peakNits, ref);
-    const float y = qBound(0.0f, inputNits / ref, 1.0f);
-    constexpr float gamma = 1.2f;
-    return ref + (peak - ref) * std::pow(y, 1.0f / gamma);
-}
-
-float bt2446MethodB(float inputNits, float referenceNits, float peakNits)
-{
-    const float ref = qMax(referenceNits, 1e-3f);
-    const float peak = qMax(peakNits, ref);
-    const float y = qBound(0.0f, inputNits / ref, 1.0f);
-    constexpr float gamma = 1.45f;
-    const float shoulder = 1.0f - std::exp(-3.5f * y);
-    return ref + (peak - ref) * std::pow(shoulder, 1.0f / gamma);
-}
-
-QVector<QPointF> generateBt2446IntermediatePoints(bool methodB, const PresetCurveParams &params)
-{
-    const float ref = qMax(params.referenceNits, 1e-3f);
-    const float peak = qMax(params.peakNits, ref);
-
-    QVector<QPointF> points;
-    points.reserve(kSampleCount);
-    for (float t : kSampleFractions) {
-        const float x = t * ref;
-        const float y = methodB ? bt2446MethodB(x, ref, peak) : bt2446MethodA(x, ref, peak);
-        points.append(QPointF(x, y));
-    }
-
-    ToneCurveEndpoints endpoints;
-    endpoints.peakNits = peak;
-    endpoints.visualReferenceNits = ref;
-    endpoints.sdrMaxPoint = QPointF(ref, peak);
-    return sanitizeIntermediatePoints(points, endpoints);
-}
-
 QVector<QPointF> generateCalibratedIntermediatePoints(const BuiltInCalibratedCurve &curve,
                                                       const PresetCurveParams &params)
 {
@@ -156,10 +116,6 @@ QString presetToString(ToneCurvePreset preset)
         return QStringLiteral("high_contrast");
     case ToneCurvePreset::Exponential:
         return QStringLiteral("exponential");
-    case ToneCurvePreset::Bt2446MethodA:
-        return QStringLiteral("bt2446_a");
-    case ToneCurvePreset::Bt2446MethodB:
-        return QStringLiteral("bt2446_b");
     case ToneCurvePreset::User:
         return QStringLiteral("user");
     case ToneCurvePreset::Custom:
@@ -192,12 +148,6 @@ ToneCurvePreset presetFromString(const QString &encoded)
     if (normalized == QLatin1String("exponential")) {
         return ToneCurvePreset::Exponential;
     }
-    if (normalized == QLatin1String("bt2446_a") || normalized == QLatin1String("bt2446_method_a")) {
-        return ToneCurvePreset::Bt2446MethodA;
-    }
-    if (normalized == QLatin1String("bt2446_b") || normalized == QLatin1String("bt2446_method_b")) {
-        return ToneCurvePreset::Bt2446MethodB;
-    }
     if (normalized == QLatin1String("user")) {
         return ToneCurvePreset::User;
     }
@@ -211,7 +161,7 @@ QVector<ToneCurvePreset> builtInToneCurvePresets()
 {
     return {ToneCurvePreset::Linear, ToneCurvePreset::Balanced, ToneCurvePreset::LiftedShadows,
             ToneCurvePreset::SoftShadows, ToneCurvePreset::VividHighlights, ToneCurvePreset::HighContrast,
-            ToneCurvePreset::Exponential, ToneCurvePreset::Bt2446MethodA, ToneCurvePreset::Bt2446MethodB};
+            ToneCurvePreset::Exponential};
 }
 
 QString presetDisplayName(ToneCurvePreset preset)
@@ -231,10 +181,6 @@ QString presetDisplayName(ToneCurvePreset preset)
         return QStringLiteral("High Contrast");
     case ToneCurvePreset::Exponential:
         return QStringLiteral("Exponential");
-    case ToneCurvePreset::Bt2446MethodA:
-        return QStringLiteral("BT.2446 Method A");
-    case ToneCurvePreset::Bt2446MethodB:
-        return QStringLiteral("BT.2446 Method B");
     case ToneCurvePreset::User:
         return QStringLiteral("User Preset");
     case ToneCurvePreset::Custom:
@@ -274,34 +220,26 @@ QVector<QPointF> generatePresetIntermediatePoints(ToneCurvePreset preset, const 
         return generateCalibratedIntermediatePoints(*curve, params);
     }
 
-    if (preset == ToneCurvePreset::Exponential) {
-        const float ref = qMax(params.referenceNits, 1e-3f);
-        const float peak = qMax(params.peakNits, ref);
-
-        QVector<QPointF> points;
-        points.reserve(kSampleCount);
-        for (float t : kSampleFractions) {
-            const float x = t * ref;
-            const float y = exponentialMapping(t) * peak;
-            points.append(QPointF(x, y));
-        }
-
-        ToneCurveEndpoints endpoints;
-        endpoints.peakNits = peak;
-        endpoints.visualReferenceNits = ref;
-        endpoints.sdrMaxPoint = QPointF(ref, peak);
-        return sanitizeIntermediatePoints(points, endpoints);
+    if (preset != ToneCurvePreset::Exponential) {
+        return {};
     }
 
-    if (preset == ToneCurvePreset::Bt2446MethodA) {
-        return generateBt2446IntermediatePoints(false, params);
+    const float ref = qMax(params.referenceNits, 1e-3f);
+    const float peak = qMax(params.peakNits, ref);
+
+    QVector<QPointF> points;
+    points.reserve(kSampleCount);
+    for (float t : kSampleFractions) {
+        const float x = t * ref;
+        const float y = exponentialMapping(t) * peak;
+        points.append(QPointF(x, y));
     }
 
-    if (preset == ToneCurvePreset::Bt2446MethodB) {
-        return generateBt2446IntermediatePoints(true, params);
-    }
-
-    return {};
+    ToneCurveEndpoints endpoints;
+    endpoints.peakNits = peak;
+    endpoints.visualReferenceNits = ref;
+    endpoints.sdrMaxPoint = QPointF(ref, peak);
+    return sanitizeIntermediatePoints(points, endpoints);
 }
 
 void applyToneCurvePreset(CalibrationSettings &settings, const KSharedConfigPtr &config)

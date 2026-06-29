@@ -293,6 +293,15 @@ void buildToneCurveLut(const QVector<QPointF> &fullCurve, float inputSpan, float
     }
 
     const float span = qMax(inputSpan, kEpsilon);
+    if (referenceNits <= 1.0f) {
+        for (int i = 0; i < size; ++i) {
+            const float u = static_cast<float>(i) / static_cast<float>(size - 1);
+            const float inputNits = u * span;
+            lut[i] = evaluateToneCurve(fullCurve, inputNits);
+        }
+        return;
+    }
+
     const float ref = qMax(qMin(referenceNits, span), kEpsilon);
     const float logRef = std::log(ref);
     const float logSpan = std::log(span);
@@ -300,7 +309,9 @@ void buildToneCurveLut(const QVector<QPointF> &fullCurve, float inputSpan, float
     for (int i = 0; i < size; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(size - 1);
         float inputNits;
-        if (u <= 0.5f) {
+        if (span <= ref * 1.001f) {
+            inputNits = u * span;
+        } else if (u <= 0.5f) {
             inputNits = (u / 0.5f) * ref;
         } else {
             const float t = (u - 0.5f) / 0.5f;

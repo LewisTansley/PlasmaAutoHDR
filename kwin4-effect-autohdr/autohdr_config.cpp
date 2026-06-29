@@ -28,12 +28,22 @@ float clampGamutExpansion(float value)
     return qBound(0.0f, value, 20.0f);
 }
 
+float clampChromaCompensation(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
 float clampHighlightRolloff(float value)
 {
     return qBound(0.0f, value, 1.0f);
 }
 
-float clampChromaCompensation(float value)
+float clampGamutMappingStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
+float clampPostCurveDebandStrength(float value)
 {
     return qBound(0.0f, value, 1.0f);
 }
@@ -155,11 +165,14 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     GeneralSettings general;
     const KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     general.autoActivateCalibrated = group.readEntry("AutoActivateCalibrated", true);
-    general.preferFloatCapture = group.readEntry("PreferFloatCapture", true);
     general.processingQuality = qBound(0, group.readEntry("ProcessingQuality", 0), 2);
     general.debandStrength = qBound(0.0f, static_cast<float>(group.readEntry("DebandStrength", 0.25)), 1.0f);
     general.ditherStrength = qBound(0.0f, static_cast<float>(group.readEntry("DitherStrength", 0.15 / 255.0)), 1.0f);
-    general.hdrFocusDimming = group.readEntry("HdrFocusDimming", false);
+    general.postCurveDebandStrength =
+        qBound(0.0f, static_cast<float>(group.readEntry("PostCurveDebandStrength", 0.0)), 1.0f);
+    general.spatialHighlightRecovery = group.readEntry("SpatialHighlightRecovery", false);
+    general.preferFloatCapture = group.readEntry("PreferFloatCapture", false);
+    general.useReferenceToneCurve = group.readEntry("UseReferenceToneCurve", false);
     return general;
 }
 
@@ -167,11 +180,13 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
 {
     KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     group.writeEntry("AutoActivateCalibrated", general.autoActivateCalibrated);
-    group.writeEntry("PreferFloatCapture", general.preferFloatCapture);
     group.writeEntry("ProcessingQuality", general.processingQuality);
     group.writeEntry("DebandStrength", general.debandStrength);
     group.writeEntry("DitherStrength", general.ditherStrength);
-    group.writeEntry("HdrFocusDimming", general.hdrFocusDimming);
+    group.writeEntry("PostCurveDebandStrength", general.postCurveDebandStrength);
+    group.writeEntry("SpatialHighlightRecovery", general.spatialHighlightRecovery);
+    group.writeEntry("PreferFloatCapture", general.preferFloatCapture);
+    group.writeEntry("UseReferenceToneCurve", general.useReferenceToneCurve);
     config->sync();
 }
 
@@ -182,8 +197,9 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.gamutExpansion = group.readEntry("GamutExpansion", 1.5f);
     settings.blackPoint = group.readEntry("BlackPoint", 0.0f);
     settings.vibrance = group.readEntry("Vibrance", 0.0f);
-    settings.highlightRolloff = group.readEntry("HighlightRolloff", 0.5f);
-    settings.chromaCompensation = group.readEntry("ChromaCompensation", 0.35f);
+    settings.chromaCompensation = group.readEntry("ChromaCompensation", 0.0f);
+    settings.highlightRolloff = group.readEntry("HighlightRolloff", 0.0f);
+    settings.gamutMappingStrength = group.readEntry("GamutMappingStrength", 0.0f);
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -223,8 +239,9 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("GamutExpansion", settings.gamutExpansion);
     group.writeEntry("BlackPoint", settings.blackPoint);
     group.writeEntry("Vibrance", settings.vibrance);
-    group.writeEntry("HighlightRolloff", settings.highlightRolloff);
     group.writeEntry("ChromaCompensation", settings.chromaCompensation);
+    group.writeEntry("HighlightRolloff", settings.highlightRolloff);
+    group.writeEntry("GamutMappingStrength", settings.gamutMappingStrength);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -236,10 +253,8 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     }
 }
 
-CalibrationSettings loadGlobalSettings(const KSharedConfigPtr &config, float defaultMaxNits,
-                                       float defaultReferenceNits)
+CalibrationSettings loadGlobalSettings(const KSharedConfigPtr &config, float defaultMaxNits)
 {
-    Q_UNUSED(defaultReferenceNits)
     CalibrationSettings settings;
     readCalibrationFromGroup(KConfigGroup(config, QString::fromLatin1(groupSettings)), settings, defaultMaxNits,
                              config);
@@ -343,8 +358,9 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     settings.vibrance = clampVibrance(settings.vibrance);
     settings.blackPoint = clampBlackPoint(settings.blackPoint);
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
-    settings.highlightRolloff = clampHighlightRolloff(settings.highlightRolloff);
     settings.chromaCompensation = clampChromaCompensation(settings.chromaCompensation);
+    settings.highlightRolloff = clampHighlightRolloff(settings.highlightRolloff);
+    settings.gamutMappingStrength = clampGamutMappingStrength(settings.gamutMappingStrength);
 
     const float peakNits = qMin(settings.maxNits, maxDisplayNits);
     settings.maxNits = peakNits;

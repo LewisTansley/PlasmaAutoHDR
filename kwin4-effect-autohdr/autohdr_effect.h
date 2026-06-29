@@ -53,10 +53,7 @@ namespace KWin {
         struct OffscreenWindowData {
             std::unique_ptr<GLTexture> texture;
             std::unique_ptr<GLFramebuffer> fbo;
-            std::unique_ptr<GLTexture> prevFrameTexture;
             bool isDirty = true;
-            bool fullRedraw = true;
-            Region damageRegion;
             QMetaObject::Connection windowDamagedConnection;
             ItemEffect windowEffect;
         };
@@ -121,21 +118,26 @@ namespace KWin {
         QPointer<QProcess> m_kdialogProcess;
         bool m_dbusRegistered = false;
         bool m_autoActivateCalibrated = true;
+        bool m_preferFloatCapture = false;
+        bool m_useReferenceToneCurve = false;
         QString m_calibratingAppKey;
         EffectWindow *m_calibratingWindow = nullptr;
         QMetaObject::Connection m_windowDeletedConnection;
 
         CalibrationSettings m_globalDefaults;
-        AutoHdr::GeneralSettings m_generalSettings;
         float m_hdrReferenceNits = 100.0f;
         float m_hdrMaxDisplayNits = 1000.0f;
         float m_hdrMinDisplayNits = 0.0f;
 
         int m_locGamutExpansion = -1;
+        int m_locChromaCompensation = -1;
+        int m_locHighlightRolloff = -1;
+        int m_locGamutMappingStrength = -1;
+        int m_locPostCurveDebandStrength = -1;
+        int m_locCaptureUsesFloat = -1;
+        int m_locSpatialHighlightRecovery = -1;
         int m_locBlackPoint = -1;
         int m_locColorVibrance = -1;
-        int m_locHighlightRolloff = -1;
-        int m_locChromaCompensation = -1;
         int m_locToneCurveInputSpan = -1;
         int m_locToneCurveReferenceNits = -1;
         int m_locMinDisplayNits = -1;
@@ -151,7 +153,12 @@ namespace KWin {
         bool m_warnedMissingToneCurveUniforms = false;
 
         mutable GLenum m_redirectInternalFormat = 0;
-        mutable bool m_redirectFormatProbed = false;
+        int m_processingQuality = 0;
+        float m_debandStrength = 0.25f;
+        float m_ditherStrength = 0.15f / 255.0f;
+        float m_postCurveDebandStrength = 0.0f;
+        int m_captureUsesFloat = 0;
+        float m_spatialHighlightRecovery = 0.0f;
 
         QString m_shaderPath;
         QDateTime m_shaderFragMtime;
