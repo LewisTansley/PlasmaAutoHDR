@@ -469,6 +469,7 @@ namespace KWin {
 
         ShaderBinder binder(m_shader.get());
         m_locGamutExpansion = m_shader->uniformLocation("gamutExpansion");
+        m_locChromaCompensation = m_shader->uniformLocation("chromaCompensation");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
@@ -495,6 +496,9 @@ namespace KWin {
         ShaderBinder binder(m_shader.get());
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
+        }
+        if (m_locChromaCompensation >= 0) {
+            m_shader->setUniform(m_locChromaCompensation, sanitized.chromaCompensation);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);

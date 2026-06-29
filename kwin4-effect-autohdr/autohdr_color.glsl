@@ -53,6 +53,24 @@ vec3 applyICtCpToneCurve(vec3 rgbNits, float targetLumaNits, float sourceLumaNit
     return result;
 }
 
+vec3 autohdrApplyChromaCompensation(vec3 rgbNits, float targetLumaNits, float sourceLumaNits, float strength)
+{
+    if (strength <= 0.0) {
+        return rgbNits;
+    }
+
+    float lumaRatio = targetLumaNits / max(sourceLumaNits, 1e-4);
+    if (lumaRatio <= 1.0) {
+        return rgbNits;
+    }
+
+    vec3 ictcp = linearToICtCp(rgbNits);
+    float highlightFalloff = 1.0 - smoothstep(1.0, 2.5, lumaRatio);
+    float chromaBoost = 1.0 + 0.2 * strength * (lumaRatio - 1.0) * highlightFalloff;
+    ictcp.yz *= chromaBoost;
+    return max(iCtCpToLinear(ictcp), vec3(0.0));
+}
+
 vec3 reconstructHighlights(vec3 rgbNits, float refNits)
 {
     vec3 rel = rgbNits / max(refNits, 1.0);

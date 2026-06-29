@@ -8,6 +8,7 @@ uniform vec4 modulation;
 uniform float blackPoint;
 uniform float colorVibrance;
 uniform float gamutExpansion;
+uniform float chromaCompensation;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -150,6 +151,7 @@ void main()
     float correctedNits = t * curveRef;
     float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
     rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
+    rgb = autohdrApplyChromaCompensation(rgb, Yn, lumaNits, chromaCompensation);
 
     if (gamutExpansion > 0.0) {
         rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;

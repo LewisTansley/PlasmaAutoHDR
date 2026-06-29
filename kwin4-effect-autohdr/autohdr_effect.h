@@ -128,6 +128,7 @@ namespace KWin {
         float m_hdrMinDisplayNits = 0.0f;
 
         int m_locGamutExpansion = -1;
+        int m_locChromaCompensation = -1;
         int m_locBlackPoint = -1;
         int m_locColorVibrance = -1;
         int m_locToneCurveInputSpan = -1;

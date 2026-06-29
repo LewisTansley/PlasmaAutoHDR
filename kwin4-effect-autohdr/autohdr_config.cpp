@@ -28,6 +28,11 @@ float clampGamutExpansion(float value)
     return qBound(0.0f, value, 20.0f);
 }
 
+float clampChromaCompensation(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
 namespace {
 
 QPointF migrateSdrMaxPoint(const KConfigGroup &group, float peakNits)
@@ -162,6 +167,7 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.gamutExpansion = group.readEntry("GamutExpansion", 1.5f);
     settings.blackPoint = group.readEntry("BlackPoint", 0.0f);
     settings.vibrance = group.readEntry("Vibrance", 0.0f);
+    settings.chromaCompensation = group.readEntry("ChromaCompensation", 0.0f);
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -201,6 +207,7 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("GamutExpansion", settings.gamutExpansion);
     group.writeEntry("BlackPoint", settings.blackPoint);
     group.writeEntry("Vibrance", settings.vibrance);
+    group.writeEntry("ChromaCompensation", settings.chromaCompensation);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -317,6 +324,7 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     settings.vibrance = clampVibrance(settings.vibrance);
     settings.blackPoint = clampBlackPoint(settings.blackPoint);
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
+    settings.chromaCompensation = clampChromaCompensation(settings.chromaCompensation);
 
     const float peakNits = qMin(settings.maxNits, maxDisplayNits);
     settings.maxNits = peakNits;

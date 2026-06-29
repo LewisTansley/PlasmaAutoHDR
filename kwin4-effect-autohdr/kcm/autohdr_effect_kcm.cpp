@@ -143,7 +143,8 @@ public:
 
         m_toneCurveEditor->setValues(globals.maxNits, globals.referenceNits, globals.sdrMaxPoint,
                                      globals.toneCurvePoints, globals.blackPoint, globals.toneCurvePreset,
-                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion);
+                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion,
+                                     globals.chromaCompensation);
 
         m_autoActivate->setChecked(AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated);
 
@@ -162,14 +163,17 @@ public:
         float blackPoint = 0.0f;
         float vibrance = 0.0f;
         float gamutExpansion = 1.5f;
+        float chromaCompensation = 0.0f;
         QPointF sdrMaxPoint;
         QVector<QPointF> intermediatePoints;
         AutoHdr::ToneCurvePreset toneCurvePreset = AutoHdr::ToneCurvePreset::Linear;
         QString toneCurveUserPresetId;
         m_toneCurveEditor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints, blackPoint,
-                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion);
+                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion,
+                                     chromaCompensation);
         globals.vibrance = vibrance;
         globals.gamutExpansion = gamutExpansion;
+        globals.chromaCompensation = chromaCompensation;
         globals.maxNits = peakNits;
         globals.referenceNits = referenceNits;
         globals.sdrMaxPoint = sdrMaxPoint;
