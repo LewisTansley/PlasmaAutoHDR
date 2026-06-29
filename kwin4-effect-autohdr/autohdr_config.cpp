@@ -38,6 +38,11 @@ float clampHighlightRolloff(float value)
     return qBound(0.0f, value, 1.0f);
 }
 
+float clampGamutMappingStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
 namespace {
 
 QPointF migrateSdrMaxPoint(const KConfigGroup &group, float peakNits)
@@ -174,6 +179,7 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.vibrance = group.readEntry("Vibrance", 0.0f);
     settings.chromaCompensation = group.readEntry("ChromaCompensation", 0.0f);
     settings.highlightRolloff = group.readEntry("HighlightRolloff", 0.0f);
+    settings.gamutMappingStrength = group.readEntry("GamutMappingStrength", 0.0f);
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -215,6 +221,7 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("Vibrance", settings.vibrance);
     group.writeEntry("ChromaCompensation", settings.chromaCompensation);
     group.writeEntry("HighlightRolloff", settings.highlightRolloff);
+    group.writeEntry("GamutMappingStrength", settings.gamutMappingStrength);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -333,6 +340,7 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
     settings.chromaCompensation = clampChromaCompensation(settings.chromaCompensation);
     settings.highlightRolloff = clampHighlightRolloff(settings.highlightRolloff);
+    settings.gamutMappingStrength = clampGamutMappingStrength(settings.gamutMappingStrength);
 
     const float peakNits = qMin(settings.maxNits, maxDisplayNits);
     settings.maxNits = peakNits;

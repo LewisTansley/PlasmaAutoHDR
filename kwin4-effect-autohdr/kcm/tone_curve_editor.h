@@ -30,11 +30,11 @@ public:
                    AutoHdr::ToneCurvePreset preset = AutoHdr::ToneCurvePreset::Linear,
                    const QString &userPresetId = QString(), float vibrance = 0.0f,
                    float gamutExpansion = 1.5f, float chromaCompensation = 0.0f,
-                   float highlightRolloff = 0.0f);
+                   float highlightRolloff = 0.0f, float gamutMappingStrength = 0.0f);
     void getValues(float &peakNits, float &referenceNits, QPointF &sdrMaxPoint,
                    QVector<QPointF> &intermediatePoints, float &blackPoint, AutoHdr::ToneCurvePreset &preset,
                    QString &userPresetId, float &vibrance, float &gamutExpansion, float &chromaCompensation,
-                   float &highlightRolloff);
+                   float &highlightRolloff, float &gamutMappingStrength);
 
     AutoHdr::ToneCurvePreset toneCurvePreset() const;
 
@@ -111,6 +111,7 @@ private:
     QDoubleSpinBox *m_gamutExpansion = nullptr;
     QDoubleSpinBox *m_chromaCompensation = nullptr;
     QDoubleSpinBox *m_highlightRolloff = nullptr;
+    QDoubleSpinBox *m_gamutMappingStrength = nullptr;
     QLabel *m_inputLabel = nullptr;
     QLabel *m_outputLabel = nullptr;
 
@@ -123,6 +124,7 @@ private:
     float m_gamutExpansionValue = 1.5f;
     float m_chromaCompensationValue = 0.0f;
     float m_highlightRolloffValue = 0.0f;
+    float m_gamutMappingStrengthValue = 0.0f;
     QPointF m_sdrMaxPoint;
     QVector<QPointF> m_intermediatePoints;
     AutoHdr::ToneCurvePreset m_preset = AutoHdr::ToneCurvePreset::Linear;

@@ -102,6 +102,29 @@ vec3 compressHighlightsICtCp(vec3 rgbNits, float kneeNits, float peakNits, float
     return mix(rgbNits, compressed, blend);
 }
 
+vec3 mapToDisplayGamutICtCp(vec3 rgbNits, float strength)
+{
+    if (strength <= 0.0) {
+        return rgbNits;
+    }
+
+    vec3 ictcp = linearToICtCp(rgbNits);
+    float chroma = length(ictcp.yz);
+    if (chroma <= 1e-4) {
+        return rgbNits;
+    }
+
+    const float maxChroma = 0.5;
+    if (chroma <= maxChroma) {
+        return rgbNits;
+    }
+
+    float scale = maxChroma / chroma;
+    float mapped = mix(1.0, scale, smoothstep(maxChroma, maxChroma * 1.5, chroma) * strength);
+    ictcp.yz *= mapped;
+    return max(iCtCpToLinear(ictcp), vec3(0.0));
+}
+
 vec3 reconstructHighlights(vec3 rgbNits, float refNits)
 {
     vec3 rel = rgbNits / max(refNits, 1.0);

@@ -99,6 +99,11 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     m_highlightRolloff->setSingleStep(0.05);
     m_highlightRolloff->setToolTip(tr("Smooth ICtCp highlight compression above 85% of display peak. "
                                       "0 keeps the legacy hard peak clip."));
+    m_gamutMappingStrength = new QDoubleSpinBox(this);
+    m_gamutMappingStrength->setRange(0.0, 1.0);
+    m_gamutMappingStrength->setSingleStep(0.05);
+    m_gamutMappingStrength->setToolTip(tr("Tames out-of-gamut colors after gamut expansion. "
+                                          "0 disables post-expansion gamut mapping."));
     m_inputLabel = new QLabel(tr("Input: —"), this);
     m_outputLabel = new QLabel(tr("Output: —"), this);
     controlsLayout->addRow(tr("Peak nits:"), m_peakNits);
@@ -108,6 +113,7 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     controlsLayout->addRow(tr("Gamut expansion boost:"), m_gamutExpansion);
     controlsLayout->addRow(tr("Chroma compensation:"), m_chromaCompensation);
     controlsLayout->addRow(tr("Highlight rolloff:"), m_highlightRolloff);
+    controlsLayout->addRow(tr("Gamut mapping:"), m_gamutMappingStrength);
     controlsLayout->addRow(m_inputLabel);
     controlsLayout->addRow(m_outputLabel);
     bodyLayout->addLayout(controlsLayout, 1);
@@ -185,6 +191,15 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
         Q_EMIT settingsChanged();
     });
     connect(m_highlightRolloff, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+    connect(m_gamutMappingStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
+        if (m_blockSignals) {
+            return;
+        }
+        m_gamutMappingStrengthValue =
+            AutoHdr::clampGamutMappingStrength(static_cast<float>(m_gamutMappingStrength->value()));
+        Q_EMIT settingsChanged();
+    });
+    connect(m_gamutMappingStrength, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
 
     connect(m_presetCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_blockSignals || index < 0) {
@@ -225,7 +240,8 @@ void ToneCurveEditor::setHdrLimits(int minPeakNits, int maxDisplayNits)
 void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPointF &sdrMaxPoint,
                                 const QVector<QPointF> &intermediatePoints, float blackPoint,
                                 AutoHdr::ToneCurvePreset preset, const QString &userPresetId, float vibrance,
-                                float gamutExpansion, float chromaCompensation, float highlightRolloff)
+                                float gamutExpansion, float chromaCompensation, float highlightRolloff,
+                                float gamutMappingStrength)
 {
     m_blockSignals = true;
     m_peakNitsValue = peakNits;
@@ -237,6 +253,7 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
     m_gamutExpansionValue = AutoHdr::clampGamutExpansion(gamutExpansion);
     m_chromaCompensationValue = AutoHdr::clampChromaCompensation(chromaCompensation);
     m_highlightRolloffValue = AutoHdr::clampHighlightRolloff(highlightRolloff);
+    m_gamutMappingStrengthValue = AutoHdr::clampGamutMappingStrength(gamutMappingStrength);
     m_preset = preset;
     m_userPresetId = userPresetId;
     syncSpinRanges();
@@ -247,6 +264,7 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
     m_gamutExpansion->setValue(m_gamutExpansionValue);
     m_chromaCompensation->setValue(m_chromaCompensationValue);
     m_highlightRolloff->setValue(m_highlightRolloffValue);
+    m_gamutMappingStrength->setValue(m_gamutMappingStrengthValue);
     enforcePeakFloor();
     sanitizePoints();
     rebuildPresetCombo();
@@ -259,7 +277,8 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
 void ToneCurveEditor::getValues(float &peakNits, float &referenceNits, QPointF &sdrMaxPoint,
                                 QVector<QPointF> &intermediatePoints, float &blackPoint,
                                 AutoHdr::ToneCurvePreset &preset, QString &userPresetId, float &vibrance,
-                                float &gamutExpansion, float &chromaCompensation, float &highlightRolloff)
+                                float &gamutExpansion, float &chromaCompensation, float &highlightRolloff,
+                                float &gamutMappingStrength)
 {
     flushSpinValuesFromUi();
     peakNits = m_peakNitsValue;
@@ -282,6 +301,10 @@ void ToneCurveEditor::getValues(float &peakNits, float &referenceNits, QPointF &
     m_highlightRolloff->interpretText();
     m_highlightRolloffValue = AutoHdr::clampHighlightRolloff(static_cast<float>(m_highlightRolloff->value()));
     highlightRolloff = m_highlightRolloffValue;
+    m_gamutMappingStrength->interpretText();
+    m_gamutMappingStrengthValue =
+        AutoHdr::clampGamutMappingStrength(static_cast<float>(m_gamutMappingStrength->value()));
+    gamutMappingStrength = m_gamutMappingStrengthValue;
     preset = m_preset;
     userPresetId = m_userPresetId;
 }

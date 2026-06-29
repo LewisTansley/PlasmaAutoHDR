@@ -21,6 +21,7 @@ struct CalibrationSettings {
     float referenceNits = 203.0f;
     float chromaCompensation = 0.0f;
     float highlightRolloff = 0.0f;
+    float gamutMappingStrength = 0.0f;
     QPointF sdrMaxPoint;
     QVector<QPointF> toneCurvePoints;
     ToneCurvePreset toneCurvePreset = ToneCurvePreset::Linear;
@@ -36,6 +37,7 @@ float clampVibrance(float value);
 float clampGamutExpansion(float value);
 float clampChromaCompensation(float value);
 float clampHighlightRolloff(float value);
+float clampGamutMappingStrength(float value);
 
 struct AppProfileMetadata {
     QString key;

@@ -10,6 +10,7 @@ uniform float colorVibrance;
 uniform float gamutExpansion;
 uniform float chromaCompensation;
 uniform float highlightRolloff;
+uniform float gamutMappingStrength;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -156,6 +157,7 @@ void main()
 
     if (gamutExpansion > 0.0) {
         rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+        rgb = mapToDisplayGamutICtCp(rgb, gamutMappingStrength);
     }
 
     vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);
