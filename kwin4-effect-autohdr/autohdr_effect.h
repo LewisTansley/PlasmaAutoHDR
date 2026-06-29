@@ -40,8 +40,7 @@ namespace KWin {
         Q_SCRIPTABLE void reloadSettings();
 
     protected:
-        void prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data,
-                            std::chrono::milliseconds presentTime) override;
+        void prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data) override;
         void drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window, int mask,
                         const Region &deviceRegion, WindowPaintData &data) override;
 

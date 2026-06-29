@@ -42,8 +42,10 @@ Useful options:
 - `--skip-deps` if you already have build dependencies installed
 - `-y` restart KWin after install without prompting
 - `-n` do not offer to restart KWin
-- `--clean` delete the build directory and reconfigure from scratch
+- `--clean` delete the build directory and reconfigure from scratch (required after a KWin/Plasma upgrade)
 - `-j N` parallel make jobs
+
+After upgrading KWin or Plasma, rebuild with `--clean`. KWin effect plugins embed the KWin version at compile time; a stale build cache leaves the effect installed but hidden from Desktop Effects.
 
 To build only the effect (no dependency install, no KWin restart prompt):
 
@@ -52,7 +54,13 @@ cd kwin4-effect-autohdr
 ./build-install.sh
 ```
 
-Add `--reload` to that script to reload KWin over D-Bus after install.
+Add `--reload` to that script to reconfigure KWin over D-Bus after install (does not reload new `.so` files; use `kwin_wayland --replace` or `install.sh -y` instead).
+
+Verify the installed plugin matches your KWin version:
+
+```bash
+kwin4-effect-autohdr/check-plugin-version.sh
+```
 
 After install:
 
@@ -126,6 +134,8 @@ kf6-kcoreaddons-devel kf6-kglobalaccel-devel kf6-ki18n-devel python3-pyside6
 ```
 
 Then run `kwin4-effect-autohdr/build-install.sh`.
+
+If KWin was upgraded since the last build, pass `--clean` so CMake picks up the new headers. The build script also auto-cleans when it detects a KWin version change.
 
 ## License
 

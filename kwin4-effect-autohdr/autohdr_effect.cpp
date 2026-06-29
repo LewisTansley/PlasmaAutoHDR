@@ -416,7 +416,7 @@ namespace KWin {
 
     void AutoHDREffect::uploadToneCurveUniforms()
     {
-        if (!m_shader || !m_shader->isValid() || !effects->makeOpenGLContextCurrent()) {
+        if (!m_shader || !effects->makeOpenGLContextCurrent()) {
             return;
         }
 
@@ -434,7 +434,7 @@ namespace KWin {
 
     void AutoHDREffect::resolveUniformLocations()
     {
-        if (!m_shader || !m_shader->isValid() || !effects->makeOpenGLContextCurrent()) {
+        if (!m_shader || !effects->makeOpenGLContextCurrent()) {
             return;
         }
 
@@ -451,7 +451,7 @@ namespace KWin {
     {
         computeToneCurveLut(settings);
 
-        if (!m_shader || !m_shader->isValid() || !effects->makeOpenGLContextCurrent()) {
+        if (!m_shader || !effects->makeOpenGLContextCurrent()) {
             return;
         }
 
@@ -476,13 +476,13 @@ namespace KWin {
     {
         if (!m_shaderPath.isEmpty()) {
             const QDateTime fragMtime = QFileInfo(m_shaderPath).lastModified();
-            if (m_shader && m_shader->isValid()) {
+            if (m_shader) {
                 if (fragMtime.isValid() && fragMtime == m_shaderFragMtime) {
                     return true;
                 }
                 m_shader.reset();
             }
-        } else if (m_shader && m_shader->isValid()) {
+        } else if (m_shader) {
             return true;
         }
 
@@ -501,7 +501,7 @@ namespace KWin {
 
         m_shader = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(),
                                                                    file.readAll());
-        if (!m_shader || !m_shader->isValid()) {
+        if (!m_shader) {
             qWarning() << "AutoHDR Effect: failed to compile HDR fragment shader from" << m_shaderPath;
             m_shader.reset();
             return false;
@@ -622,27 +622,26 @@ namespace KWin {
         }
     }
 
-    void AutoHDREffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data,
-                                       std::chrono::milliseconds presentTime)
+    void AutoHDREffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data)
     {
         if (m_pendingUnredirects.contains(w) && !m_activeWindows.contains(w)) {
             performUnredirect(w);
         }
 
-        if (m_activeWindows.contains(w) && m_shader && m_shader->isValid()) {
+        if (m_activeWindows.contains(w) && m_shader) {
             updateUniforms(m_activeWindows.value(w));
             if (m_toneCurveLutDirty) {
                 uploadToneCurveUniforms();
             }
         }
 
-        effects->prePaintWindow(view, w, data, presentTime);
+        effects->prePaintWindow(view, w, data);
     }
 
     void AutoHDREffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport,
                                    EffectWindow *window, int mask, const Region &deviceRegion, WindowPaintData &data)
     {
-        if (m_activeWindows.contains(window) && m_shader && m_shader->isValid()) {
+        if (m_activeWindows.contains(window) && m_shader) {
             updateUniforms(m_activeWindows.value(window));
             if (m_toneCurveLutDirty) {
                 uploadToneCurveUniforms();

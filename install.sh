@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EFFECT_DIR="$ROOT/kwin4-effect-autohdr"
 BUILD_INSTALL="$EFFECT_DIR/build-install.sh"
+CHECK_VERSION="$EFFECT_DIR/check-plugin-version.sh"
 
 SKIP_DEPS=0
 YES_RESTART=0
@@ -26,8 +27,33 @@ Build options (passed to build-install.sh):
   --clean           Delete build/ and reconfigure from scratch
   --reconfigure     Re-run cmake without deleting build/
   --no-install      Build only, skip install
+  --no-auto-clean   Do not auto-delete build/ when KWin version changes
+  --no-version-check Skip post-install plugin version verification
   -j N              Parallel make jobs (default: nproc)
 EOF
+}
+
+verify_plugin_version() {
+    if [[ ! -x "$CHECK_VERSION" ]]; then
+        echo "Warning: version check script not found: $CHECK_VERSION" >&2
+        return 0
+    fi
+
+    if "$CHECK_VERSION"; then
+        return 0
+    fi
+
+    cat <<EOF >&2
+
+The installed plugin does not match your system KWin version.
+AutoHDR will not appear in Desktop Effects until you rebuild against the
+current KWin headers.
+
+Re-run with --clean, for example:
+  ./install.sh --skip-deps --clean -y
+
+EOF
+    return 1
 }
 
 kwin_session_available() {
@@ -227,7 +253,7 @@ while [[ $# -gt 0 ]]; do
         --skip-deps) SKIP_DEPS=1; shift ;;
         -y|--yes-restart) YES_RESTART=1; shift ;;
         -n|--no-restart) NO_RESTART=1; shift ;;
-        --clean|--reconfigure|--no-install)
+        --clean|--reconfigure|--no-install|--no-auto-clean|--no-version-check)
             BUILD_ARGS+=("$1")
             shift
             ;;
@@ -270,6 +296,10 @@ fi
 
 echo "Building and installing the KWin effect..."
 "$BUILD_INSTALL" "${BUILD_ARGS[@]}"
+
+if ! verify_plugin_version; then
+    exit 1
+fi
 
 refresh_kde_caches
 prompt_restart_kwin
