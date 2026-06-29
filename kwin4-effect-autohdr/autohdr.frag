@@ -9,6 +9,7 @@ uniform float blackPoint;
 uniform float colorVibrance;
 uniform float gamutExpansion;
 uniform float chromaCompensation;
+uniform float highlightRolloff;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -161,8 +162,13 @@ void main()
     rgb = sceneMapped * ref;
 
     float outLuma = dot(rgb, AUTOHDR_LUMA);
-    if (outLuma > displayPeak) {
-        rgb *= displayPeak / outLuma;
+    if (highlightRolloff <= 0.0) {
+        if (outLuma > displayPeak) {
+            rgb *= displayPeak / outLuma;
+        }
+    } else {
+        float kneeNits = displayPeak * 0.85;
+        rgb = compressHighlightsICtCp(rgb, kneeNits, displayPeak, highlightRolloff);
     }
 
     rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref);

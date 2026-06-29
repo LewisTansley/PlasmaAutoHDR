@@ -71,6 +71,37 @@ vec3 autohdrApplyChromaCompensation(vec3 rgbNits, float targetLumaNits, float so
     return max(iCtCpToLinear(ictcp), vec3(0.0));
 }
 
+vec3 compressHighlightsICtCp(vec3 rgbNits, float kneeNits, float peakNits, float rolloff)
+{
+    if (rolloff <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = dot(rgbNits, AUTOHDR_LUMA);
+    float blend = smoothstep(kneeNits * 0.95, kneeNits * 1.05, luma);
+    if (blend <= 0.0) {
+        return rgbNits;
+    }
+
+    vec3 compressed = rgbNits;
+    if (luma > kneeNits) {
+        vec3 ictcp = linearToICtCp(rgbNits);
+        float Igray = linearToICtCp(vec3(luma)).x;
+        float IgrayKnee = linearToICtCp(vec3(kneeNits)).x;
+        float IgrayPeak = linearToICtCp(vec3(peakNits)).x;
+
+        if (Igray > IgrayKnee && IgrayPeak > IgrayKnee) {
+            float excess = (Igray - IgrayKnee) / max(IgrayPeak - IgrayKnee, 1e-4);
+            float rolled = excess / (1.0 + rolloff * 3.0 * excess);
+            float IgrayOut = IgrayKnee + rolled * (IgrayPeak - IgrayKnee);
+            ictcp.x += (IgrayOut - Igray);
+            compressed = max(iCtCpToLinear(ictcp), vec3(0.0));
+        }
+    }
+
+    return mix(rgbNits, compressed, blend);
+}
+
 vec3 reconstructHighlights(vec3 rgbNits, float refNits)
 {
     vec3 rel = rgbNits / max(refNits, 1.0);
