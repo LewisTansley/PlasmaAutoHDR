@@ -116,6 +116,9 @@ public:
         m_processingQuality->addItem(i18n("Quality"), 2);
         processingLayout->addRow(i18n("Processing quality:"), m_processingQuality);
 
+        m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture (recommended)"), processingGroup);
+        processingLayout->addRow(m_preferFloatCapture);
+
         m_debandStrength = new QDoubleSpinBox(processingGroup);
         m_debandStrength->setRange(0.0, 1.0);
         m_debandStrength->setSingleStep(0.05);
@@ -159,6 +162,7 @@ public:
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
         connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
+        connect(m_preferFloatCapture, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -191,6 +195,7 @@ public:
         m_autoActivate->setChecked(general.autoActivateCalibrated);
         const int qualityIndex = m_processingQuality->findData(general.processingQuality);
         m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
+        m_preferFloatCapture->setChecked(general.preferFloatCapture);
         m_debandStrength->setValue(general.debandStrength);
         m_ditherStrength->setValue(general.ditherStrength);
         m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
@@ -241,6 +246,7 @@ public:
         AutoHdr::GeneralSettings general;
         general.autoActivateCalibrated = m_autoActivate->isChecked();
         general.processingQuality = m_processingQuality->currentData().toInt();
+        general.preferFloatCapture = m_preferFloatCapture->isChecked();
         general.debandStrength = static_cast<float>(m_debandStrength->value());
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
         general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
@@ -322,6 +328,7 @@ private:
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
     QComboBox *m_processingQuality = nullptr;
+    QCheckBox *m_preferFloatCapture = nullptr;
     QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
     QDoubleSpinBox *m_postCurveDebandStrength = nullptr;

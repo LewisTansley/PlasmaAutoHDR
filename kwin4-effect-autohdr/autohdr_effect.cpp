@@ -391,6 +391,7 @@ namespace KWin {
         m_ditherStrength = general.ditherStrength;
         m_postCurveDebandStrength = general.postCurveDebandStrength;
         m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
+        m_preferFloatCapture = general.preferFloatCapture;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -625,11 +626,18 @@ namespace KWin {
         }
 
         m_redirectInternalFormat = GL_RGBA8;
-        if (qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")) {
+
+        const bool forceFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
+            && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") != 0;
+        const bool force8Bit = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
+            && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") == 0;
+        const bool preferFloat = !force8Bit && (forceFloat || m_preferFloatCapture);
+
+        if (preferFloat) {
             if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
                 m_redirectInternalFormat = GL_RGBA16F;
             } else {
-                qWarning() << "AutoHDR Effect: AUTOHDR_FLOAT_FBO set but GL_RGBA16F unavailable";
+                qWarning() << "AutoHDR Effect: GL_RGBA16F unavailable, falling back to GL_RGBA8";
             }
         }
 
