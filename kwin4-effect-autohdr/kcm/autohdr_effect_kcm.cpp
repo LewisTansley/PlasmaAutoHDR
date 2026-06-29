@@ -18,6 +18,7 @@
 #include <QDBusMessage>
 #include <QDoubleSpinBox>
 #include <QFile>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -26,6 +27,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -84,6 +86,77 @@ void notifyKWin()
                                                                      QStringLiteral("reconfigureEffect"));
     reconfigureMessage.setArguments({QStringLiteral("kwin4_effect_autohdr")});
     bus.call(reconfigureMessage);
+}
+
+QJsonObject profileToJson(const AutoHdr::AppProfile &profile)
+{
+    QJsonObject root;
+    QJsonObject metadata;
+    metadata.insert(QStringLiteral("key"), profile.metadata.key);
+    metadata.insert(QStringLiteral("displayName"), profile.metadata.displayName);
+    metadata.insert(QStringLiteral("windowClass"), profile.metadata.windowClass);
+    metadata.insert(QStringLiteral("resourceClass"), profile.metadata.resourceClass);
+    metadata.insert(QStringLiteral("desktopFile"), profile.metadata.desktopFile);
+    metadata.insert(QStringLiteral("autoActivate"), profile.metadata.autoActivate);
+    root.insert(QStringLiteral("metadata"), metadata);
+
+    const AutoHdr::CalibrationSettings &s = profile.settings;
+    QJsonObject settings;
+    settings.insert(QStringLiteral("MaxNits"), s.maxNits);
+    settings.insert(QStringLiteral("GamutExpansion"), static_cast<double>(s.gamutExpansion));
+    settings.insert(QStringLiteral("BlackPoint"), static_cast<double>(s.blackPoint));
+    settings.insert(QStringLiteral("Vibrance"), static_cast<double>(s.vibrance));
+    settings.insert(QStringLiteral("ReferenceNits"), static_cast<double>(s.referenceNits));
+    settings.insert(QStringLiteral("ChromaCompensation"), static_cast<double>(s.chromaCompensation));
+    settings.insert(QStringLiteral("HighlightRolloff"), static_cast<double>(s.highlightRolloff));
+    settings.insert(QStringLiteral("GamutMappingStrength"), static_cast<double>(s.gamutMappingStrength));
+    settings.insert(QStringLiteral("SdrMaxPoint"), AutoHdr::formatSdrMaxPoint(s.sdrMaxPoint));
+    settings.insert(QStringLiteral("ToneCurvePoints"), AutoHdr::formatToneCurvePoints(s.toneCurvePoints));
+    settings.insert(QStringLiteral("ToneCurvePreset"), AutoHdr::presetToString(s.toneCurvePreset));
+    settings.insert(QStringLiteral("ToneCurveUserPresetId"), s.toneCurveUserPresetId);
+    root.insert(QStringLiteral("settings"), settings);
+    return root;
+}
+
+std::optional<AutoHdr::AppProfile> profileFromJson(const QJsonObject &root)
+{
+    if (!root.contains(QStringLiteral("metadata")) || !root.contains(QStringLiteral("settings"))) {
+        return std::nullopt;
+    }
+
+    AutoHdr::AppProfile profile;
+    const QJsonObject metadata = root.value(QStringLiteral("metadata")).toObject();
+    profile.metadata.key = metadata.value(QStringLiteral("key")).toString();
+    profile.metadata.displayName = metadata.value(QStringLiteral("displayName")).toString();
+    profile.metadata.windowClass = metadata.value(QStringLiteral("windowClass")).toString();
+    profile.metadata.resourceClass = metadata.value(QStringLiteral("resourceClass")).toString();
+    profile.metadata.desktopFile = metadata.value(QStringLiteral("desktopFile")).toString();
+    profile.metadata.autoActivate = metadata.value(QStringLiteral("autoActivate")).toBool(true);
+
+    if (profile.metadata.key.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const QJsonObject settings = root.value(QStringLiteral("settings")).toObject();
+    profile.settings.maxNits = static_cast<float>(settings.value(QStringLiteral("MaxNits")).toDouble(1000.0));
+    profile.settings.gamutExpansion = static_cast<float>(settings.value(QStringLiteral("GamutExpansion")).toDouble(1.5));
+    profile.settings.blackPoint = static_cast<float>(settings.value(QStringLiteral("BlackPoint")).toDouble(0.0));
+    profile.settings.vibrance = static_cast<float>(settings.value(QStringLiteral("Vibrance")).toDouble(0.0));
+    profile.settings.referenceNits = static_cast<float>(settings.value(QStringLiteral("ReferenceNits")).toDouble(203.0));
+    profile.settings.chromaCompensation =
+        static_cast<float>(settings.value(QStringLiteral("ChromaCompensation")).toDouble(0.0));
+    profile.settings.highlightRolloff =
+        static_cast<float>(settings.value(QStringLiteral("HighlightRolloff")).toDouble(0.0));
+    profile.settings.gamutMappingStrength =
+        static_cast<float>(settings.value(QStringLiteral("GamutMappingStrength")).toDouble(0.0));
+    profile.settings.sdrMaxPoint =
+        AutoHdr::parseSdrMaxPoint(settings.value(QStringLiteral("SdrMaxPoint")).toString(), QPointF());
+    profile.settings.toneCurvePoints =
+        AutoHdr::parseToneCurvePoints(settings.value(QStringLiteral("ToneCurvePoints")).toString());
+    profile.settings.toneCurvePreset =
+        AutoHdr::presetFromString(settings.value(QStringLiteral("ToneCurvePreset")).toString());
+    profile.settings.toneCurveUserPresetId = settings.value(QStringLiteral("ToneCurveUserPresetId")).toString();
+    return profile;
 }
 
 } // namespace
@@ -147,13 +220,21 @@ public:
         auto *appsGroup = new QGroupBox(i18n("Calibrated Applications"), widget());
         auto *appsLayout = new QVBoxLayout(appsGroup);
 
+        auto *appsButtons = new QHBoxLayout();
+        auto *importButton = new QPushButton(i18n("Import profile…"), appsGroup);
+        auto *exportButton = new QPushButton(i18n("Export profile…"), appsGroup);
+        appsButtons->addWidget(importButton);
+        appsButtons->addWidget(exportButton);
+        appsButtons->addStretch();
+        appsLayout->addLayout(appsButtons);
+
         m_appsTable = new QTableWidget(0, 3, appsGroup);
         m_appsTable->setHorizontalHeaderLabels({i18n("Application"), i18n("Auto-activate"), i18n("")});
         m_appsTable->horizontalHeader()->setStretchLastSection(false);
         m_appsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
         m_appsTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
         m_appsTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-        m_appsTable->setSelectionMode(QAbstractItemView::NoSelection);
+        m_appsTable->setSelectionMode(QAbstractItemView::SingleSelection);
         m_appsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
         appsLayout->addWidget(m_appsTable);
 
@@ -168,6 +249,8 @@ public:
         connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
         connect(m_spatialHighlightRecovery, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(importButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::importProfile);
+        connect(exportButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::exportProfile);
     }
 
     void load() override
@@ -257,6 +340,62 @@ public:
 
         KCModule::save();
         notifyKWin();
+    }
+
+private Q_SLOTS:
+    void importProfile()
+    {
+        const QString path =
+            QFileDialog::getOpenFileName(widget(), i18n("Import AutoHDR Profile"), QString(), i18n("JSON (*.json)"));
+        if (path.isEmpty()) {
+            return;
+        }
+
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(widget(), i18n("Import Failed"), i18n("Could not open the selected file."));
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        const std::optional<AutoHdr::AppProfile> profile = profileFromJson(doc.object());
+        if (!profile) {
+            QMessageBox::warning(widget(), i18n("Import Failed"), i18n("The file is not a valid AutoHDR profile."));
+            return;
+        }
+
+        AutoHdr::saveAppProfile(m_config, *profile);
+        rebuildAppsTable();
+        markAsChanged();
+    }
+
+    void exportProfile()
+    {
+        const int row = m_appsTable->currentRow();
+        if (row < 0 || row >= m_appKeys.size()) {
+            QMessageBox::information(widget(), i18n("Export Profile"), i18n("Select an application row first."));
+            return;
+        }
+
+        const std::optional<AutoHdr::AppProfile> profile = AutoHdr::loadAppProfile(m_config, m_appKeys.at(row));
+        if (!profile) {
+            return;
+        }
+
+        const QString path = QFileDialog::getSaveFileName(widget(), i18n("Export AutoHDR Profile"),
+                                                          profile->metadata.displayName + QStringLiteral(".json"),
+                                                          i18n("JSON (*.json)"));
+        if (path.isEmpty()) {
+            return;
+        }
+
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::warning(widget(), i18n("Export Failed"), i18n("Could not write the selected file."));
+            return;
+        }
+
+        file.write(QJsonDocument(profileToJson(*profile)).toJson(QJsonDocument::Indented));
     }
 
 private:
