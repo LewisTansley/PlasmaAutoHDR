@@ -9,7 +9,8 @@ uniform float blackPoint;
 uniform float colorVibrance;
 uniform float gamutExpansion;
 uniform float toneCurveInputSpan;
-uniform float toneCurveLut[256];
+uniform float toneCurveReferenceNits;
+uniform float toneCurveLut[512];
 uniform float debandStrength;
 uniform float ditherStrength;
 uniform int processingQuality;
@@ -21,13 +22,39 @@ out vec4 fragColor;
 
 #include "autohdr_color.glsl"
 
-float mapToneCurve(float inputNits, float inputSpan)
+float toneCurveU(float inputNits, float inputSpan, float referenceNits)
 {
     float span = max(inputSpan, 1e-3);
-    float u = clamp(inputNits / span, 0.0, 1.0);
-    float idx = u * 255.0;
+    inputNits = clamp(inputNits, 0.0, span);
+
+    if (referenceNits <= 1.0) {
+        return inputNits / span;
+    }
+
+    float ref = max(min(referenceNits, span), 1e-3);
+    if (span <= ref * 1.001) {
+        return inputNits / span;
+    }
+
+    float uLinear = (inputNits / ref) * 0.5;
+    if (inputNits <= ref) {
+        return uLinear;
+    }
+
+    float logRef = log(ref);
+    float logSpan = log(span);
+    float t = (log(inputNits) - logRef) / max(logSpan - logRef, 1e-4);
+    float uLog = 0.5 + t * 0.5;
+    float blend = smoothstep(ref * 0.95, ref * 1.05, inputNits);
+    return mix(uLinear, uLog, blend);
+}
+
+float mapToneCurve(float inputNits, float inputSpan, float referenceNits)
+{
+    float u = toneCurveU(inputNits, inputSpan, referenceNits);
+    float idx = u * 511.0;
     int i0 = int(floor(idx));
-    int i1 = min(i0 + 1, 255);
+    int i1 = min(i0 + 1, 511);
     float f = fract(idx);
     return mix(toneCurveLut[i0], toneCurveLut[i1], f);
 }
@@ -117,9 +144,10 @@ void main()
     t = adaptiveShadowRolloff(t);
     t = applyUserBlackPoint(t, blackPoint);
 
-    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
-    float correctedNits = t * ref;
-    float Yn = mapToneCurve(correctedNits, curveSpan);
+    float curveRef = toneCurveReferenceNits > 1.0 ? toneCurveReferenceNits : ref;
+    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : curveRef;
+    float correctedNits = t * curveRef;
+    float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
     rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
 
     if (gamutExpansion > 0.0) {

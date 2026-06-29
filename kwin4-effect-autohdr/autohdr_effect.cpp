@@ -425,9 +425,11 @@ namespace KWin {
         const AutoHdr::ToneCurveEndpoints endpoints =
             AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
         const QVector<QPointF> fullCurve = AutoHdr::buildFullCurve(endpoints, sanitized.toneCurvePoints);
-        const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
+        const float inputSpan = qMax(endpoints.peakNits, qMax(endpoints.visualReferenceNits, 1.0f));
         m_cachedToneCurveInputSpan = inputSpan;
-        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        m_cachedToneCurveReferenceNits = sanitized.referenceNits;
+        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
+                                   AutoHdr::kToneCurveLutSize);
         m_toneCurveLutDirty = true;
     }
 
@@ -446,6 +448,9 @@ namespace KWin {
         if (m_locToneCurveInputSpan >= 0) {
             m_shader->setUniform(m_locToneCurveInputSpan, m_cachedToneCurveInputSpan);
         }
+        if (m_locToneCurveReferenceNits >= 0) {
+            m_shader->setUniform(m_locToneCurveReferenceNits, m_cachedToneCurveReferenceNits);
+        }
         m_toneCurveLutDirty = false;
     }
 
@@ -460,6 +465,7 @@ namespace KWin {
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
+        m_locToneCurveReferenceNits = m_shader->uniformLocation("toneCurveReferenceNits");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");

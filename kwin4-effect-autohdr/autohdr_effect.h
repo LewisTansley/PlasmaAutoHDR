@@ -130,6 +130,7 @@ namespace KWin {
         int m_locBlackPoint = -1;
         int m_locColorVibrance = -1;
         int m_locToneCurveInputSpan = -1;
+        int m_locToneCurveReferenceNits = -1;
         int m_locToneCurveLut = -1;
         int m_locDebandStrength = -1;
         int m_locDitherStrength = -1;
@@ -138,6 +139,7 @@ namespace KWin {
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
         bool m_toneCurveLutDirty = true;
         float m_cachedToneCurveInputSpan = 203.0f;
+        float m_cachedToneCurveReferenceNits = 203.0f;
         bool m_warnedMissingToneCurveUniforms = false;
 
         mutable GLenum m_redirectInternalFormat = 0;
