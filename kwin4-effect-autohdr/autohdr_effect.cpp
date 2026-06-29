@@ -1,8 +1,20 @@
 #include "autohdr_effect.h"
+#include <core/colorspace.h>
+#include <core/pixelgrid.h>
+#include <core/rendertarget.h>
+#include <core/renderviewport.h>
 #include <effect/effecthandler.h>
 #include <effect/effectwindow.h>
+#include <opengl/eglcontext.h>
+#include <opengl/glframebuffer.h>
 #include <opengl/glshadermanager.h>
 #include <opengl/glshader.h>
+#include <opengl/gltexture.h>
+#include <opengl/glutils.h>
+#include <opengl/glvertexbuffer.h>
+#include <scene/item.h>
+#include <scene/itemgeometry.h>
+#include <scene/windowitem.h>
 #include <window.h>
 #include <QAction>
 #include <QDBusConnection>
@@ -75,7 +87,7 @@ namespace KWin {
 
     KWIN_EFFECT_FACTORY_SUPPORTED(AutoHDREffect,
                                   "metadata.json",
-                                  return KWin::OffscreenEffect::supported();)
+                                  return effects && effects->isOpenGLCompositing();)
 
     AutoHDREffect::AutoHDREffect()
     {
@@ -104,9 +116,6 @@ namespace KWin {
         connect(effects, &EffectsHandler::windowClosed, this, [this](EffectWindow *w) {
             m_activeWindows.remove(w);
             m_pendingUnredirects.remove(w);
-            if (m_redirectedWindows.contains(w)) {
-                m_redirectedWindows.remove(w);
-            }
             if (w == m_calibratingWindow) {
                 m_calibratingWindow = nullptr;
                 m_calibratingAppKey.clear();
@@ -121,6 +130,9 @@ namespace KWin {
 
         m_shaderPath = shaderPath;
         loadShader();
+        if (effects->makeOpenGLContextCurrent()) {
+            redirectInternalFormat();
+        }
     }
 
     AutoHDREffect::~AutoHDREffect()
@@ -128,13 +140,18 @@ namespace KWin {
         unregisterDBusService();
         effects->hideOnScreenMessage();
         if (effects->makeOpenGLContextCurrent()) {
-            for (EffectWindow *window : std::as_const(m_redirectedWindows)) {
+            QList<EffectWindow *> redirected;
+            for (const auto &entry : m_offscreenWindows) {
+                redirected.append(entry.first);
+            }
+            for (EffectWindow *window : redirected) {
                 unredirect(window);
             }
         }
-        m_redirectedWindows.clear();
+        m_offscreenWindows.clear();
         m_activeWindows.clear();
         m_pendingUnredirects.clear();
+        destroyOffscreenConnections();
         m_calibratingWindow = nullptr;
     }
 
@@ -444,6 +461,9 @@ namespace KWin {
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
+        m_locDebandStrength = m_shader->uniformLocation("debandStrength");
+        m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
+        m_locProcessingQuality = m_shader->uniformLocation("processingQuality");
         warnMissingToneCurveUniformsOnce();
     }
 
@@ -468,16 +488,53 @@ namespace KWin {
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
         }
+        if (m_locDebandStrength >= 0) {
+            m_shader->setUniform(m_locDebandStrength, m_debandStrength);
+        }
+        if (m_locDitherStrength >= 0) {
+            m_shader->setUniform(m_locDitherStrength, m_ditherStrength);
+        }
+        if (m_locProcessingQuality >= 0) {
+            m_shader->setUniform(m_locProcessingQuality, m_processingQuality);
+        }
 
         uploadToneCurveUniforms();
+    }
+
+    QByteArray AutoHDREffect::loadShaderSource() const
+    {
+        QFile fragFile(m_shaderPath);
+        if (!fragFile.open(QIODevice::ReadOnly)) {
+            return {};
+        }
+
+        QByteArray source = fragFile.readAll();
+        const QString colorPath = QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl");
+        QFile colorFile(colorPath);
+        if (!colorFile.open(QIODevice::ReadOnly)) {
+            qWarning() << "AutoHDR Effect: color shader module not found at" << colorPath;
+            return {};
+        }
+
+        const QByteArray colorSource = colorFile.readAll();
+        const QByteArray includeDirective = QByteArrayLiteral("#include \"autohdr_color.glsl\"");
+        const int includePos = source.indexOf(includeDirective);
+        if (includePos >= 0) {
+            source.replace(includePos, includeDirective.size(), colorSource);
+        } else {
+            source.prepend(colorSource);
+        }
+        return source;
     }
 
     bool AutoHDREffect::loadShader()
     {
         if (!m_shaderPath.isEmpty()) {
             const QDateTime fragMtime = QFileInfo(m_shaderPath).lastModified();
+            const QString colorPath = QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl");
+            const QDateTime colorMtime = QFileInfo(colorPath).lastModified();
             if (m_shader) {
-                if (fragMtime.isValid() && fragMtime == m_shaderFragMtime) {
+                if (fragMtime.isValid() && fragMtime == m_shaderFragMtime && colorMtime == m_shaderColorMtime) {
                     return true;
                 }
                 m_shader.reset();
@@ -493,14 +550,13 @@ namespace KWin {
             return false;
         }
 
-        QFile file(m_shaderPath);
-        if (!file.open(QIODevice::ReadOnly)) {
+        const QByteArray source = loadShaderSource();
+        if (source.isEmpty()) {
             qWarning() << "AutoHDR Effect: failed to open fragment shader" << m_shaderPath;
             return false;
         }
 
-        m_shader = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(),
-                                                                   file.readAll());
+        m_shader = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(), source);
         if (!m_shader) {
             qWarning() << "AutoHDR Effect: failed to compile HDR fragment shader from" << m_shaderPath;
             m_shader.reset();
@@ -508,26 +564,233 @@ namespace KWin {
         }
 
         m_shaderFragMtime = QFileInfo(m_shaderPath).lastModified();
+        m_shaderColorMtime =
+            QFileInfo(QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl")).lastModified();
         resolveUniformLocations();
         return true;
     }
 
+    GLenum AutoHDREffect::redirectInternalFormat() const
+    {
+        if (m_redirectInternalFormat != 0) {
+            return m_redirectInternalFormat;
+        }
+
+        m_redirectInternalFormat = GL_RGBA8;
+        if (qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")) {
+            if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
+                m_redirectInternalFormat = GL_RGBA16F;
+            } else {
+                qWarning() << "AutoHDR Effect: AUTOHDR_FLOAT_FBO set but GL_RGBA16F unavailable";
+            }
+        }
+
+        const char *formatName = m_redirectInternalFormat == GL_RGBA16F ? "GL_RGBA16F" : "GL_RGBA8";
+        qInfo() << "AutoHDR Effect: redirect capture FBO format" << formatName;
+        return m_redirectInternalFormat;
+    }
+
+    void AutoHDREffect::setupOffscreenConnections()
+    {
+        if (m_windowDeletedConnection) {
+            return;
+        }
+        m_windowDeletedConnection =
+            connect(effects, &EffectsHandler::windowDeleted, this, &AutoHDREffect::handleWindowDeleted);
+    }
+
+    void AutoHDREffect::destroyOffscreenConnections()
+    {
+        disconnect(m_windowDeletedConnection);
+        m_windowDeletedConnection = {};
+    }
+
+    void AutoHDREffect::handleWindowDeleted(EffectWindow *window)
+    {
+        unredirect(window);
+    }
+
+    void AutoHDREffect::redirect(EffectWindow *window)
+    {
+        if (!window || m_offscreenWindows.contains(window)) {
+            return;
+        }
+
+        auto data = std::make_unique<OffscreenWindowData>();
+        data->windowEffect = ItemEffect(window->windowItem());
+        data->windowDamagedConnection =
+            connect(window, &EffectWindow::windowDamaged, this, [this, window]() {
+                const auto it = m_offscreenWindows.find(window);
+                if (it != m_offscreenWindows.end()) {
+                    it->second->isDirty = true;
+                }
+            });
+
+        m_offscreenWindows.emplace(window, std::move(data));
+        if (m_offscreenWindows.size() == 1) {
+            setupOffscreenConnections();
+        }
+    }
+
+    void AutoHDREffect::unredirect(EffectWindow *window)
+    {
+        auto it = m_offscreenWindows.find(window);
+        if (it == m_offscreenWindows.end()) {
+            return;
+        }
+
+        if (!EglContext::currentContext()) {
+            effects->openglContext()->makeCurrent();
+        }
+
+        disconnect(it->second->windowDamagedConnection);
+        m_offscreenWindows.erase(it);
+        if (m_offscreenWindows.empty()) {
+            destroyOffscreenConnections();
+        }
+    }
+
+    void AutoHDREffect::maybeRenderOffscreen(EffectWindow *window)
+    {
+        auto it = m_offscreenWindows.find(window);
+        if (it == m_offscreenWindows.end()) {
+            return;
+        }
+
+        OffscreenWindowData *offscreenData = it->second.get();
+        const qreal scale = window->screen()->scale();
+        const RectF logicalGeometry = snapToPixels(window->expandedGeometry(), scale);
+        const QSize textureSize = (logicalGeometry.size() * scale).toSize();
+
+        if (textureSize.isEmpty()) {
+            offscreenData->fbo.reset();
+            offscreenData->texture.reset();
+            return;
+        }
+
+        if (!offscreenData->texture || offscreenData->texture->size() != textureSize) {
+            offscreenData->texture = GLTexture::allocate(redirectInternalFormat(), textureSize);
+            if (!offscreenData->texture) {
+                return;
+            }
+            offscreenData->texture->setFilter(GL_LINEAR);
+            offscreenData->texture->setWrapMode(GL_CLAMP_TO_EDGE);
+            offscreenData->fbo = std::make_unique<GLFramebuffer>(offscreenData->texture.get());
+            offscreenData->isDirty = true;
+        }
+
+        if (!offscreenData->isDirty) {
+            return;
+        }
+
+        RenderTarget renderTarget(offscreenData->fbo.get(), ColorDescription::sRGB);
+        RenderViewport viewport(logicalGeometry, scale, renderTarget, QPoint());
+        GLFramebuffer::pushFramebuffer(offscreenData->fbo.get());
+        glClearColor(0.0, 0.0, 0.0, 0.0);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        WindowPaintData paintData;
+        paintData.setOpacity(1.0);
+
+        const int mask = Effect::PAINT_WINDOW_TRANSFORMED | Effect::PAINT_WINDOW_TRANSLUCENT;
+        effects->drawWindow(renderTarget, viewport, window, mask, Region::infinite(), paintData);
+
+        GLFramebuffer::popFramebuffer();
+        offscreenData->isDirty = false;
+    }
+
+    void AutoHDREffect::paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                                         EffectWindow *window, int mask, const Region &deviceRegion,
+                                         const WindowPaintData &data, const WindowQuadList &quads)
+    {
+        auto it = m_offscreenWindows.find(window);
+        if (it == m_offscreenWindows.end() || !it->second->texture || !m_shader) {
+            WindowPaintData fallbackData = data;
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, fallbackData);
+            return;
+        }
+
+        OffscreenWindowData *offscreenData = it->second.get();
+        GLShader *shader = m_shader.get();
+
+        ShaderBinder binder(shader);
+        const double scale = viewport.scale();
+
+        GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+        vbo->reset();
+        vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
+
+        RenderGeometry geometry;
+        for (const WindowQuad &quad : quads) {
+            geometry.appendWindowQuad(quad, scale);
+        }
+        geometry.postProcessTextureCoordinates(offscreenData->texture->matrix(NormalizedCoordinates));
+
+        const auto map = vbo->map<GLVertex2D>(geometry.size());
+        if (!map) {
+            return;
+        }
+        geometry.copy(*map);
+        vbo->unmap();
+        vbo->bindArrays();
+
+        const qreal rgb = data.brightness() * data.opacity();
+        const qreal a = data.opacity();
+
+        QMatrix4x4 mvp = viewport.projectionMatrix();
+        mvp.translate(std::round(window->x() * scale), std::round(window->y() * scale));
+
+        const auto toXYZ = renderTarget.colorDescription()->containerColorimetry().toXYZ();
+        shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp * data.toMatrix(scale));
+        shader->setUniform(GLShader::Vec4Uniform::ModulationConstant, QVector4D(rgb, rgb, rgb, a));
+        shader->setUniform(GLShader::FloatUniform::Saturation, data.saturation());
+        shader->setUniform(GLShader::Vec3Uniform::PrimaryBrightness, QVector3D(toXYZ(1, 0), toXYZ(1, 1), toXYZ(1, 2)));
+        shader->setUniform(GLShader::IntUniform::TextureWidth, offscreenData->texture->width());
+        shader->setUniform(GLShader::IntUniform::TextureHeight, offscreenData->texture->height());
+        shader->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+
+        const bool clipping = deviceRegion != Region::infinite();
+        const Region clipRegion =
+            clipping ? viewport.transform().map(deviceRegion, renderTarget.transformedSize()) : Region::infinite();
+
+        if (clipping) {
+            glEnable(GL_SCISSOR_TEST);
+        }
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+        offscreenData->texture->bind();
+        vbo->draw(clipRegion, GL_TRIANGLES, 0, geometry.count(), clipping);
+        offscreenData->texture->unbind();
+
+        glDisable(GL_BLEND);
+        if (clipping) {
+            glDisable(GL_SCISSOR_TEST);
+        }
+        vbo->unbindArrays();
+    }
+
+    bool AutoHDREffect::blocksDirectScanout() const
+    {
+        return false;
+    }
+
     void AutoHDREffect::performUnredirect(EffectWindow *window)
     {
-        if (!window || !m_redirectedWindows.contains(window)) {
+        if (!window || !m_offscreenWindows.contains(window)) {
             m_pendingUnredirects.remove(window);
             return;
         }
 
         unredirect(window);
-        m_redirectedWindows.remove(window);
         m_pendingUnredirects.remove(window);
     }
 
-    void AutoHDREffect::activateWindow(EffectWindow *window, const CalibrationSettings &settings)
+    bool AutoHDREffect::activateWindow(EffectWindow *window, const CalibrationSettings &settings)
     {
         if (!window || !loadShader()) {
-            return;
+            return false;
         }
 
         m_pendingUnredirects.remove(window);
@@ -538,12 +801,11 @@ namespace KWin {
 
         updateUniforms(sanitized);
 
-        if (!m_redirectedWindows.contains(window)) {
+        if (!m_offscreenWindows.contains(window)) {
             redirect(window);
-            m_redirectedWindows.insert(window);
         }
-        setShader(window, m_shader.get());
         window->addRepaintFull();
+        return true;
     }
 
     void AutoHDREffect::scheduleUnredirect(EffectWindow *window)
@@ -554,7 +816,7 @@ namespace KWin {
 
         m_activeWindows.remove(window);
 
-        if (!m_redirectedWindows.contains(window)) {
+        if (!m_offscreenWindows.contains(window)) {
             m_pendingUnredirects.remove(window);
             return;
         }
@@ -584,8 +846,9 @@ namespace KWin {
             return;
         }
 
-        activateWindow(window, profile->settings);
-        qInfo() << "AutoHDR Effect: auto-activated for" << window->windowClass();
+        if (activateWindow(window, profile->settings)) {
+            qInfo() << "AutoHDR Effect: auto-activated for" << window->windowClass();
+        }
     }
 
     void AutoHDREffect::reevaluateAllWindows()
@@ -641,13 +904,35 @@ namespace KWin {
     void AutoHDREffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport,
                                    EffectWindow *window, int mask, const Region &deviceRegion, WindowPaintData &data)
     {
+        auto it = m_offscreenWindows.find(window);
+        if (it == m_offscreenWindows.end()) {
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+            return;
+        }
+
         if (m_activeWindows.contains(window) && m_shader) {
             updateUniforms(m_activeWindows.value(window));
             if (m_toneCurveLutDirty) {
                 uploadToneCurveUniforms();
             }
         }
-        OffscreenEffect::drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+
+        const RectF expandedGeometry = snapToPixels(window->expandedGeometry(), viewport.scale());
+        const RectF frameGeometry = snapToPixels(window->frameGeometry(), viewport.scale());
+
+        RectF visibleRect = expandedGeometry;
+        visibleRect.moveTopLeft(expandedGeometry.topLeft() - frameGeometry.topLeft());
+        WindowQuad quad;
+        quad[0] = WindowVertex(visibleRect.topLeft(), QPointF(0, 0));
+        quad[1] = WindowVertex(visibleRect.topRight(), QPointF(1, 0));
+        quad[2] = WindowVertex(visibleRect.bottomRight(), QPointF(1, 1));
+        quad[3] = WindowVertex(visibleRect.bottomLeft(), QPointF(0, 1));
+
+        WindowQuadList quads;
+        quads.append(quad);
+
+        maybeRenderOffscreen(window);
+        paintOffscreen(renderTarget, viewport, window, mask, deviceRegion, data, quads);
     }
 
     void AutoHDREffect::toggleAutoHDR()

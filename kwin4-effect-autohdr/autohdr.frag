@@ -10,11 +10,16 @@ uniform float colorVibrance;
 uniform float gamutExpansion;
 uniform float toneCurveInputSpan;
 uniform float toneCurveLut[256];
+uniform float debandStrength;
+uniform float ditherStrength;
+uniform int processingQuality;
+uniform int textureWidth;
+uniform int textureHeight;
 
 in vec2 texcoord0;
 out vec4 fragColor;
 
-const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+#include "autohdr_color.glsl"
 
 float mapToneCurve(float inputNits, float inputSpan)
 {
@@ -29,7 +34,7 @@ float mapToneCurve(float inputNits, float inputSpan)
 
 vec3 applyColorControls(vec3 rgb, float sat, float vib)
 {
-    float luma = dot(rgb, LUMA);
+    float luma = dot(rgb, AUTOHDR_LUMA);
     float maxVal = max(rgb.r, max(rgb.g, rgb.b));
     float minVal = min(rgb.r, min(rgb.g, rgb.b));
     float lnm = maxVal - minVal;
@@ -41,75 +46,44 @@ vec3 applyColorControls(vec3 rgb, float sat, float vib)
     return mix(vec3(luma), rgb, sat);
 }
 
-// Special K / UE-inspired gamut expansion for highlight saturation recovery.
-// Expects linear Rec709-relative RGB (scRGB-style). Applied after luminance expansion.
-vec3 rec709ToXYZ(vec3 linearRec709)
+vec3 sampleSdrRel(sampler2D tex, vec2 uv, float ref, float sourceWhite)
 {
-    return vec3(
-        dot(linearRec709, vec3(0.412390798, 0.357584327, 0.180480793)),
-        dot(linearRec709, vec3(0.212639004, 0.715168655, 0.072192319)),
-        dot(linearRec709, vec3(0.019330818, 0.119194783, 0.950532138))
-    );
+    vec4 texSample = texture(tex, uv);
+    float alpha = max(texSample.a, 0.001);
+    texSample = encodingToNits(texSample, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                             sourceTransferFunctionParams.y);
+    texSample.rgb = (colorimetryTransform * vec4(texSample.rgb, 1.0)).rgb;
+    texSample.rgb *= ref / sourceWhite;
+    return texSample.rgb / alpha / ref;
 }
 
-vec3 ap1D65ToRec709(vec3 linearAP1)
+vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, ivec2 texSize, float ref,
+                  float sourceWhite)
 {
-    const mat3 ap1D65ToXYZ = mat3(
-        vec3(0.647507191, 0.266086400, -0.005448868),
-        vec3(0.134379134, 0.675967813,  0.004072095),
-        vec3(0.168569595, 0.057945795,  1.090434551)
-    );
-    const mat3 xyzToRec709 = mat3(
-        vec3(3.240969896, -0.969243646,  0.055630080),
-        vec3(-1.537383198,  1.875967503, -0.203976959),
-        vec3(-0.498610765,  0.041555058,  1.056971550)
-    );
-    return xyzToRec709 * (ap1D65ToXYZ * linearAP1);
-}
-
-vec3 expandGamut(vec3 vHDRColor, float fExpandGamut)
-{
-    if (fExpandGamut <= 0.0) {
-        return vHDRColor;
+    if (strength <= 0.0) {
+        return centerRel;
     }
 
-    const mat3 sRGB_2_AP1_D65 = mat3(
-        vec3(0.616850994, 0.069866394, 0.020549067),
-        vec3(0.334062934, 0.917416679, 0.107642211),
-        vec3(0.049086072, 0.012716927, 0.871808722)
-    );
-    const mat3 AP1_D65_2_sRGB = mat3(
-        vec3(1.692679398, -0.128573980, -0.024022465),
-        vec3(-0.606218057,  1.137933633, -0.126211718),
-        vec3(-0.086461341, -0.009359653,  1.150234183)
-    );
-    const mat3 Wide_2_AP1_D65 = mat3(
-        vec3(0.834516905, 0.025545194, 0.001925829),
-        vec3(0.160259590, 0.973101532, 0.030372797),
-        vec3(0.005223505, 0.001353275, 0.967701374)
-    );
-    const mat3 AP1_2_sRGB = mat3(
-        vec3(1.70505, -0.13026, -0.02400),
-        vec3(-0.62179, 1.14080, -0.12897),
-        vec3(-0.08326, -0.01055, 1.15297)
+    ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+    vec3 accum = centerRel;
+    float count = 1.0;
+
+    const ivec2 offsets[4] = ivec2[4](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)
     );
 
-    const mat3 ExpandMat = Wide_2_AP1_D65 * AP1_D65_2_sRGB;
-    vec3 ColorAP1 = sRGB_2_AP1_D65 * vHDRColor;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
+        vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
+        vec3 neighborRel = sampleSdrRel(tex, nuv, ref, sourceWhite);
+        float band = isBandStep(neighborRel.r - centerRel.r)
+                   * isBandStep(neighborRel.g - centerRel.g)
+                   * isBandStep(neighborRel.b - centerRel.b);
+        accum += mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
+        count += band * strength;
+    }
 
-    float LumaAP1 = rec709ToXYZ(ap1D65ToRec709(ColorAP1)).y;
-    vec3 ChromaAP1 = ColorAP1 / LumaAP1;
-
-    float ChromaDistSqr = dot(ChromaAP1 - 1.0, ChromaAP1 - 1.0);
-    ChromaDistSqr = max(abs(ChromaDistSqr), 0.000001);
-
-    float ExpandAmount = (1.0 - exp2(-4.0 * ChromaDistSqr))
-                       * (1.0 - exp2(-4.0 * fExpandGamut * LumaAP1 * LumaAP1));
-
-    vec3 ColorExpand = ExpandMat * ColorAP1;
-    ColorAP1 = mix(ColorAP1, ColorExpand, ExpandAmount);
-
-    return AP1_2_sRGB * ColorAP1;
+    return accum / count;
 }
 
 void main()
@@ -122,33 +96,46 @@ void main()
     float ref = max(destinationReferenceLuminance, 1.0);
     float displayPeak = max(maxDestinationLuminance, ref);
 
-    // Align decoded source white to the KDE HDR calibration reference highlight.
     float sourceWhite = max(sourceTransferFunctionParams.x + sourceTransferFunctionParams.y, 1.0);
     tex.rgb *= ref / sourceWhite;
 
     float alpha = max(tex.a, 0.001);
     vec3 rgb = tex.rgb / alpha;
 
-    float lumaNits = max(dot(rgb, LUMA), 1e-6);
+    float deband = processingQuality > 0 ? debandStrength : 0.0;
+    if (deband > 0.0 && textureWidth > 0 && textureHeight > 0) {
+        ivec2 texSize = ivec2(textureWidth, textureHeight);
+        vec3 centerRel = rgb / ref;
+        centerRel = debandSdrRel(sampler, texcoord0, centerRel, deband, texSize, ref, sourceWhite);
+        rgb = centerRel * ref;
+    }
+
+    rgb = reconstructHighlights(rgb, ref);
+
+    float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;
-    t = max(t - blackPoint, 0.0) / max(1.0 - blackPoint, 1e-6);
+    t = adaptiveShadowRolloff(t);
+    t = applyUserBlackPoint(t, blackPoint);
 
     float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
     float correctedNits = t * ref;
     float Yn = mapToneCurve(correctedNits, curveSpan);
-    rgb = rgb * (Yn / lumaNits);
+    rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
+
+    if (gamutExpansion > 0.0) {
+        rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+    }
 
     vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);
     rgb = sceneMapped * ref;
 
-    if (gamutExpansion > 0.0) {
-        rgb = expandGamut(rgb / ref, gamutExpansion) * ref;
-    }
-
-    float outLuma = dot(rgb, LUMA);
+    float outLuma = dot(rgb, AUTOHDR_LUMA);
     if (outLuma > displayPeak) {
         rgb *= displayPeak / outLuma;
     }
+
+    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref);
+
     tex.rgb = max(rgb * alpha, vec3(0.0));
     tex *= modulation;
     fragColor = nitsToDestinationEncoding(tex);

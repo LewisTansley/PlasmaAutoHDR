@@ -1237,19 +1237,27 @@ def run_qt_form(
             self.black_point_spin.setRange(-0.01, 0.01)
             self.black_point_spin.setDecimals(4)
             self.black_point_spin.setSingleStep(0.0001)
+            self.black_point_spin.setToolTip(
+                "Fine-tune shadow lift on top of automatic 8-bit shadow roll-off. "
+                "Leave at 0 for most content."
+            )
             self.vibrance_spin = QDoubleSpinBox(self)
             self.vibrance_spin.setRange(0.0, 10.0)
             self.vibrance_spin.setSingleStep(0.1)
             self.gamut_spin = QDoubleSpinBox(self)
             self.gamut_spin.setRange(0.0, 20.0)
             self.gamut_spin.setSingleStep(0.1)
+            self.gamut_spin.setToolTip(
+                "Boosts automatic saturation-aware gamut expansion. "
+                "0 applies a reduced baseline; 1.5 matches the previous default strength."
+            )
             self.input_label = QLabel("Input: —", self)
             self.output_label = QLabel("Output: —", self)
             controls.addRow("Peak nits:", self.peak_spin)
             controls.addRow("Reference nits:", self.reference_spin)
-            controls.addRow("Black point:", self.black_point_spin)
+            controls.addRow("Shadow offset:", self.black_point_spin)
             controls.addRow("Vibrance:", self.vibrance_spin)
-            controls.addRow("Gamut expansion:", self.gamut_spin)
+            controls.addRow("Gamut expansion boost:", self.gamut_spin)
             controls.addRow(self.input_label)
             controls.addRow(self.output_label)
             body.addLayout(controls, 1)

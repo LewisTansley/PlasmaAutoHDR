@@ -79,19 +79,23 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     m_blackPoint->setRange(-0.01, 0.01);
     m_blackPoint->setDecimals(4);
     m_blackPoint->setSingleStep(0.0001);
+    m_blackPoint->setToolTip(tr("Fine-tune shadow lift on top of automatic 8-bit shadow roll-off. "
+                                 "Leave at 0 for most content."));
     m_vibrance = new QDoubleSpinBox(this);
     m_vibrance->setRange(0.0, 10.0);
     m_vibrance->setSingleStep(0.1);
     m_gamutExpansion = new QDoubleSpinBox(this);
     m_gamutExpansion->setRange(0.0, 20.0);
     m_gamutExpansion->setSingleStep(0.1);
+    m_gamutExpansion->setToolTip(tr("Boosts automatic saturation-aware gamut expansion. "
+                                    "0 applies a reduced baseline; 1.5 matches the previous default strength."));
     m_inputLabel = new QLabel(tr("Input: —"), this);
     m_outputLabel = new QLabel(tr("Output: —"), this);
     controlsLayout->addRow(tr("Peak nits:"), m_peakNits);
     controlsLayout->addRow(tr("Reference nits:"), m_referenceNits);
-    controlsLayout->addRow(tr("Black point:"), m_blackPoint);
+    controlsLayout->addRow(tr("Shadow offset:"), m_blackPoint);
     controlsLayout->addRow(tr("Vibrance:"), m_vibrance);
-    controlsLayout->addRow(tr("Gamut expansion:"), m_gamutExpansion);
+    controlsLayout->addRow(tr("Gamut expansion boost:"), m_gamutExpansion);
     controlsLayout->addRow(m_inputLabel);
     controlsLayout->addRow(m_outputLabel);
     bodyLayout->addLayout(controlsLayout, 1);
