@@ -130,7 +130,7 @@ vec3 decodeToNits(vec4 tex, float ref, float sourceWhite)
     return tex.rgb / alpha;
 }
 
-vec3 toneMapDecodedNits(vec3 rgb, float ref, float curveRef, float curveSpan, float blackPoint)
+vec3 toneMapDecodedNits(vec3 rgb, float ref, float curveSpan, float blackPoint)
 {
     rgb = reconstructHighlights(rgb, ref);
 
@@ -139,19 +139,21 @@ vec3 toneMapDecodedNits(vec3 rgb, float ref, float curveRef, float curveSpan, fl
     t = adaptiveShadowRolloff(t, minDisplayNits, ref);
     t = applyUserBlackPoint(t, blackPoint);
 
-    float correctedNits = t * curveRef;
-    float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
+    float curveRef = toneCurveReferenceNits > 1.0 ? toneCurveReferenceNits : ref;
+    float correctedNits = toneCurveReferenceNits > 1.0 ? (t * curveRef) : (t * ref);
+    float curveMapRef = toneCurveReferenceNits > 1.0 ? curveRef : 0.0;
+    float span = toneCurveInputSpan > 1.0 ? curveSpan : (toneCurveReferenceNits > 1.0 ? curveRef : ref);
+    float Yn = mapToneCurve(correctedNits, span, curveMapRef);
     return applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
 }
 
-vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float sourceWhite, float curveRef, float curveSpan,
-                          float blackPoint)
+vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float sourceWhite, float curveSpan, float blackPoint)
 {
-    return toneMapDecodedNits(decodeToNits(texture(tex, uv), ref, sourceWhite), ref, curveRef, curveSpan, blackPoint);
+    return toneMapDecodedNits(decodeToNits(texture(tex, uv), ref, sourceWhite), ref, curveSpan, blackPoint);
 }
 
 vec3 debandPostCurveNits(sampler2D tex, vec2 texcoord, vec3 centerNits, float strength, ivec2 texSize, float ref,
-                         float sourceWhite, float curveRef, float curveSpan, float blackPoint)
+                         float sourceWhite, float curveSpan, float blackPoint)
 {
     if (strength <= 0.0) {
         return centerNits;
@@ -169,12 +171,13 @@ vec3 debandPostCurveNits(sampler2D tex, vec2 texcoord, vec3 centerNits, float st
     for (int i = 0; i < 4; ++i) {
         ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
         vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
-        vec3 neighborNits = sampleToneMappedNits(tex, nuv, ref, sourceWhite, curveRef, curveSpan, blackPoint);
+        vec3 neighborNits = sampleToneMappedNits(tex, nuv, ref, sourceWhite, curveSpan, blackPoint);
         vec3 neighborRel = neighborNits / ref;
-        vec3 blended = debandPostCurve(centerRel, neighborRel, strength, ref);
-        float band = step(0.001, length(blended - centerRel));
-        accum += blended;
-        count += band;
+        float band = isPostCurveBandStep(neighborRel.r - centerRel.r, ref)
+                   * isPostCurveBandStep(neighborRel.g - centerRel.g, ref)
+                   * isPostCurveBandStep(neighborRel.b - centerRel.b, ref);
+        accum += mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength * 0.5);
+        count += band * strength * 0.5;
     }
 
     return (accum / count) * ref;
@@ -183,9 +186,6 @@ vec3 debandPostCurveNits(sampler2D tex, vec2 texcoord, vec3 centerNits, float st
 void main()
 {
     vec4 tex = texture(sampler, texcoord0);
-    if (captureUsesFloat == 0) {
-        tex = clamp(tex, 0.0, 1.0);
-    }
 
     tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
     tex.rgb = (colorimetryTransform * vec4(tex.rgb, 1.0)).rgb;
@@ -221,17 +221,18 @@ void main()
     t = applyUserBlackPoint(t, blackPoint);
 
     float curveRef = toneCurveReferenceNits > 1.0 ? toneCurveReferenceNits : ref;
-    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : curveRef;
-    float correctedNits = t * curveRef;
-    float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
+    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : (toneCurveReferenceNits > 1.0 ? curveRef : ref);
+    float correctedNits = toneCurveReferenceNits > 1.0 ? (t * curveRef) : (t * ref);
+    float curveMapRef = toneCurveReferenceNits > 1.0 ? curveRef : 0.0;
+    float Yn = mapToneCurve(correctedNits, curveSpan, curveMapRef);
     rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
     rgb = autohdrApplyChromaCompensation(rgb, Yn, lumaNits, chromaCompensation);
 
     float postDeband = postCurveDebandStrength;
     if (postDeband > 0.0 && textureWidth > 0 && textureHeight > 0) {
         ivec2 texSize = ivec2(textureWidth, textureHeight);
-        rgb = debandPostCurveNits(sampler, texcoord0, rgb, postDeband, texSize, ref, sourceWhite, curveRef,
-                                  curveSpan, blackPoint);
+        rgb = debandPostCurveNits(sampler, texcoord0, rgb, postDeband, texSize, ref, sourceWhite, curveSpan,
+                                  blackPoint);
     }
 
     if (gamutExpansion > 0.0) {

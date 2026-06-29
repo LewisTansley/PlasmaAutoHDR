@@ -189,8 +189,12 @@ public:
         m_processingQuality->addItem(i18n("Quality"), 2);
         processingLayout->addRow(i18n("Processing quality:"), m_processingQuality);
 
-        m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture (recommended)"), processingGroup);
+        m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture"), processingGroup);
         processingLayout->addRow(m_preferFloatCapture);
+
+        m_useReferenceToneCurve = new QCheckBox(
+            i18n("Reference-aware tone curve (maps SDR white to calibration reference nits)"), processingGroup);
+        processingLayout->addRow(m_useReferenceToneCurve);
 
         m_debandStrength = new QDoubleSpinBox(processingGroup);
         m_debandStrength->setRange(0.0, 1.0);
@@ -244,6 +248,7 @@ public:
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
         connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_preferFloatCapture, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_useReferenceToneCurve, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -272,13 +277,12 @@ public:
                                      globals.chromaCompensation, globals.highlightRolloff,
                                      globals.gamutMappingStrength);
 
-        m_autoActivate->setChecked(AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated);
-
         const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
         m_autoActivate->setChecked(general.autoActivateCalibrated);
         const int qualityIndex = m_processingQuality->findData(general.processingQuality);
         m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
         m_preferFloatCapture->setChecked(general.preferFloatCapture);
+        m_useReferenceToneCurve->setChecked(general.useReferenceToneCurve);
         m_debandStrength->setValue(general.debandStrength);
         m_ditherStrength->setValue(general.ditherStrength);
         m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
@@ -330,6 +334,7 @@ public:
         general.autoActivateCalibrated = m_autoActivate->isChecked();
         general.processingQuality = m_processingQuality->currentData().toInt();
         general.preferFloatCapture = m_preferFloatCapture->isChecked();
+        general.useReferenceToneCurve = m_useReferenceToneCurve->isChecked();
         general.debandStrength = static_cast<float>(m_debandStrength->value());
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
         general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
@@ -364,7 +369,11 @@ private Q_SLOTS:
             return;
         }
 
-        AutoHdr::saveAppProfile(m_config, *profile);
+        AutoHdr::AppProfile imported = *profile;
+        const HdrDisplayLimits limits = readHdrDisplayLimits();
+        AutoHdr::sanitizeCalibrationSettings(imported.settings, static_cast<float>(limits.referenceNits),
+                                            static_cast<float>(limits.maxDisplayNits), m_config);
+        AutoHdr::saveAppProfile(m_config, imported);
         rebuildAppsTable();
         markAsChanged();
     }
@@ -468,6 +477,7 @@ private:
     QCheckBox *m_autoActivate = nullptr;
     QComboBox *m_processingQuality = nullptr;
     QCheckBox *m_preferFloatCapture = nullptr;
+    QCheckBox *m_useReferenceToneCurve = nullptr;
     QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
     QDoubleSpinBox *m_postCurveDebandStrength = nullptr;

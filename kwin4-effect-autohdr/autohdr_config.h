@@ -61,7 +61,8 @@ struct GeneralSettings {
     float ditherStrength = 0.15f / 255.0f;
     float postCurveDebandStrength = 0.0f;
     bool spatialHighlightRecovery = false;
-    bool preferFloatCapture = true;
+    bool preferFloatCapture = false;
+    bool useReferenceToneCurve = false;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

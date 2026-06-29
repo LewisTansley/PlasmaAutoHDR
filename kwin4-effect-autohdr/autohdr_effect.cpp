@@ -165,6 +165,7 @@ namespace KWin {
     {
         Q_UNUSED(flags)
         m_config->reparseConfiguration();
+        m_redirectInternalFormat = 0;
         loadGlobalDefaults(false);
         reevaluateAllWindows();
     }
@@ -392,6 +393,7 @@ namespace KWin {
         m_postCurveDebandStrength = general.postCurveDebandStrength;
         m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
         m_preferFloatCapture = general.preferFloatCapture;
+        m_useReferenceToneCurve = general.useReferenceToneCurve;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -439,11 +441,18 @@ namespace KWin {
         const AutoHdr::ToneCurveEndpoints endpoints =
             AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
         const QVector<QPointF> fullCurve = AutoHdr::buildFullCurve(endpoints, sanitized.toneCurvePoints);
-        const float inputSpan = qMax(endpoints.peakNits, qMax(endpoints.visualReferenceNits, 1.0f));
-        m_cachedToneCurveInputSpan = inputSpan;
-        m_cachedToneCurveReferenceNits = sanitized.referenceNits;
-        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
-                                   AutoHdr::kToneCurveLutSize);
+        if (m_useReferenceToneCurve) {
+            const float inputSpan = qMax(endpoints.peakNits, qMax(endpoints.visualReferenceNits, 1.0f));
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = sanitized.referenceNits;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
+                                       AutoHdr::kToneCurveLutSize);
+        } else {
+            const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = 0.0f;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, 0.0f, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        }
         m_toneCurveLutDirty = true;
     }
 

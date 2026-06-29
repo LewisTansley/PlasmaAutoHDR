@@ -171,7 +171,8 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     general.postCurveDebandStrength =
         qBound(0.0f, static_cast<float>(group.readEntry("PostCurveDebandStrength", 0.0)), 1.0f);
     general.spatialHighlightRecovery = group.readEntry("SpatialHighlightRecovery", false);
-    general.preferFloatCapture = group.readEntry("PreferFloatCapture", true);
+    general.preferFloatCapture = group.readEntry("PreferFloatCapture", false);
+    general.useReferenceToneCurve = group.readEntry("UseReferenceToneCurve", false);
     return general;
 }
 
@@ -185,6 +186,7 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("PostCurveDebandStrength", general.postCurveDebandStrength);
     group.writeEntry("SpatialHighlightRecovery", general.spatialHighlightRecovery);
     group.writeEntry("PreferFloatCapture", general.preferFloatCapture);
+    group.writeEntry("UseReferenceToneCurve", general.useReferenceToneCurve);
     config->sync();
 }
 

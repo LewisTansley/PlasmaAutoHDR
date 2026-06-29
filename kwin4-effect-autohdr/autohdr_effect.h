@@ -118,7 +118,8 @@ namespace KWin {
         QPointer<QProcess> m_kdialogProcess;
         bool m_dbusRegistered = false;
         bool m_autoActivateCalibrated = true;
-        bool m_preferFloatCapture = true;
+        bool m_preferFloatCapture = false;
+        bool m_useReferenceToneCurve = false;
         QString m_calibratingAppKey;
         EffectWindow *m_calibratingWindow = nullptr;
         QMetaObject::Connection m_windowDeletedConnection;
