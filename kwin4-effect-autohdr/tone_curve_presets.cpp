@@ -14,43 +14,63 @@ namespace {
 constexpr float kSampleFractions[] = {0.25f, 0.5f, 0.75f};
 constexpr int kSampleCount = 3;
 
-constexpr float kSCurveBoostStrength = 0.65f;
-constexpr float kSCurveLiftAmount = 0.12f;
 constexpr float kExponentialRate = 2.4f;
 
-float smoothstep(float t)
+struct BuiltInCalibratedCurve {
+    ToneCurvePreset preset;
+    QVector<QPointF> normalizedPoints;
+};
+
+const BuiltInCalibratedCurve kCalibratedCurves[] = {
+    {ToneCurvePreset::Balanced,
+     {QPointF(0.2405f, 0.0492f), QPointF(0.7548f, 0.7492f)}},
+    {ToneCurvePreset::LiftedShadows,
+     {QPointF(0.2491f, 0.1302f), QPointF(0.7462f, 0.7492f)}},
+    {ToneCurvePreset::SoftShadows,
+     {QPointF(0.3562f, 0.1397f), QPointF(0.7537f, 0.7490f)}},
+    {ToneCurvePreset::VividHighlights,
+     {QPointF(0.3605f, 0.1444f), QPointF(0.7033f, 0.7492f)}},
+    {ToneCurvePreset::HighContrast,
+     {QPointF(0.2533f, 0.0587f), QPointF(0.7044f, 0.7490f)}},
+};
+
+const BuiltInCalibratedCurve *calibratedCurveFor(ToneCurvePreset preset)
 {
-    return t * t * (3.0f - 2.0f * t);
+    for (const BuiltInCalibratedCurve &curve : kCalibratedCurves) {
+        if (curve.preset == preset) {
+            return &curve;
+        }
+    }
+    return nullptr;
 }
 
-float presetMapping(ToneCurvePreset preset, float t)
+float exponentialMapping(float t)
 {
-    t = qBound(0.0f, t, 1.0f);
-
-    switch (preset) {
-    case ToneCurvePreset::Linear:
+    const float k = kExponentialRate;
+    const float denom = std::exp(k) - 1.0f;
+    if (std::abs(denom) < 1e-6f) {
         return t;
-    case ToneCurvePreset::SCurve:
-        return smoothstep(t);
-    case ToneCurvePreset::SCurveBoosted: {
-        const float s = smoothstep(t);
-        return t + kSCurveBoostStrength * (s - t);
     }
-    case ToneCurvePreset::SCurveLifted:
-        return kSCurveLiftAmount + (1.0f - kSCurveLiftAmount) * smoothstep(t);
-    case ToneCurvePreset::Exponential: {
-        const float k = kExponentialRate;
-        const float denom = std::exp(k) - 1.0f;
-        if (std::abs(denom) < 1e-6f) {
-            return t;
-        }
-        return (std::exp(k * t) - 1.0f) / denom;
+    return (std::exp(k * t) - 1.0f) / denom;
+}
+
+QVector<QPointF> generateCalibratedIntermediatePoints(const BuiltInCalibratedCurve &curve,
+                                                      const PresetCurveParams &params)
+{
+    const float ref = qMax(params.referenceNits, 1e-3f);
+    const float peak = qMax(params.peakNits, ref);
+
+    QVector<QPointF> points;
+    points.reserve(curve.normalizedPoints.size());
+    for (const QPointF &point : curve.normalizedPoints) {
+        points.append(QPointF(static_cast<float>(point.x()) * ref, static_cast<float>(point.y()) * peak));
     }
-    case ToneCurvePreset::Custom:
-    case ToneCurvePreset::User:
-        break;
-    }
-    return t;
+
+    ToneCurveEndpoints endpoints;
+    endpoints.peakNits = peak;
+    endpoints.visualReferenceNits = ref;
+    endpoints.sdrMaxPoint = QPointF(ref, peak);
+    return sanitizeIntermediatePoints(points, endpoints);
 }
 
 bool pointsMatch(const QVector<QPointF> &a, const QVector<QPointF> &b, float toleranceNits)
@@ -84,12 +104,16 @@ QString presetToString(ToneCurvePreset preset)
     switch (preset) {
     case ToneCurvePreset::Linear:
         return QStringLiteral("linear");
-    case ToneCurvePreset::SCurve:
-        return QStringLiteral("scurve");
-    case ToneCurvePreset::SCurveBoosted:
-        return QStringLiteral("scurve_boosted");
-    case ToneCurvePreset::SCurveLifted:
-        return QStringLiteral("scurve_lifted");
+    case ToneCurvePreset::Balanced:
+        return QStringLiteral("balanced");
+    case ToneCurvePreset::LiftedShadows:
+        return QStringLiteral("lifted_shadows");
+    case ToneCurvePreset::SoftShadows:
+        return QStringLiteral("soft_shadows");
+    case ToneCurvePreset::VividHighlights:
+        return QStringLiteral("vivid_highlights");
+    case ToneCurvePreset::HighContrast:
+        return QStringLiteral("high_contrast");
     case ToneCurvePreset::Exponential:
         return QStringLiteral("exponential");
     case ToneCurvePreset::User:
@@ -106,14 +130,20 @@ ToneCurvePreset presetFromString(const QString &encoded)
     if (normalized == QLatin1String("linear")) {
         return ToneCurvePreset::Linear;
     }
-    if (normalized == QLatin1String("scurve")) {
-        return ToneCurvePreset::SCurve;
+    if (normalized == QLatin1String("balanced") || normalized == QLatin1String("scurve")) {
+        return ToneCurvePreset::Balanced;
     }
-    if (normalized == QLatin1String("scurve_boosted")) {
-        return ToneCurvePreset::SCurveBoosted;
+    if (normalized == QLatin1String("lifted_shadows") || normalized == QLatin1String("scurve_boosted")) {
+        return ToneCurvePreset::LiftedShadows;
     }
-    if (normalized == QLatin1String("scurve_lifted")) {
-        return ToneCurvePreset::SCurveLifted;
+    if (normalized == QLatin1String("soft_shadows") || normalized == QLatin1String("scurve_lifted")) {
+        return ToneCurvePreset::SoftShadows;
+    }
+    if (normalized == QLatin1String("vivid_highlights")) {
+        return ToneCurvePreset::VividHighlights;
+    }
+    if (normalized == QLatin1String("high_contrast")) {
+        return ToneCurvePreset::HighContrast;
     }
     if (normalized == QLatin1String("exponential")) {
         return ToneCurvePreset::Exponential;
@@ -129,8 +159,9 @@ ToneCurvePreset presetFromString(const QString &encoded)
 
 QVector<ToneCurvePreset> builtInToneCurvePresets()
 {
-    return {ToneCurvePreset::Linear, ToneCurvePreset::SCurve, ToneCurvePreset::SCurveBoosted,
-            ToneCurvePreset::SCurveLifted, ToneCurvePreset::Exponential};
+    return {ToneCurvePreset::Linear, ToneCurvePreset::Balanced, ToneCurvePreset::LiftedShadows,
+            ToneCurvePreset::SoftShadows, ToneCurvePreset::VividHighlights, ToneCurvePreset::HighContrast,
+            ToneCurvePreset::Exponential};
 }
 
 QString presetDisplayName(ToneCurvePreset preset)
@@ -138,12 +169,16 @@ QString presetDisplayName(ToneCurvePreset preset)
     switch (preset) {
     case ToneCurvePreset::Linear:
         return QStringLiteral("Linear");
-    case ToneCurvePreset::SCurve:
-        return QStringLiteral("S-Curve");
-    case ToneCurvePreset::SCurveBoosted:
-        return QStringLiteral("S-Curve Boosted");
-    case ToneCurvePreset::SCurveLifted:
-        return QStringLiteral("S-Curve Lifted");
+    case ToneCurvePreset::Balanced:
+        return QStringLiteral("Balanced");
+    case ToneCurvePreset::LiftedShadows:
+        return QStringLiteral("Lifted Shadows");
+    case ToneCurvePreset::SoftShadows:
+        return QStringLiteral("Soft Shadows");
+    case ToneCurvePreset::VividHighlights:
+        return QStringLiteral("Vivid Highlights");
+    case ToneCurvePreset::HighContrast:
+        return QStringLiteral("High Contrast");
     case ToneCurvePreset::Exponential:
         return QStringLiteral("Exponential");
     case ToneCurvePreset::User:
@@ -154,9 +189,38 @@ QString presetDisplayName(ToneCurvePreset preset)
     return QStringLiteral("Custom");
 }
 
+std::optional<ToneCurvePreset> builtInPresetForLegacyUserId(const QString &userPresetId)
+{
+    const QString normalized = userPresetId.trimmed().toLower();
+    if (normalized == QLatin1String("s_curve_dark")) {
+        return ToneCurvePreset::Balanced;
+    }
+    if (normalized == QLatin1String("s_boosted_low")) {
+        return ToneCurvePreset::LiftedShadows;
+    }
+    if (normalized == QLatin1String("s_flat_low")) {
+        return ToneCurvePreset::SoftShadows;
+    }
+    if (normalized == QLatin1String("s_flat_low_boosted_high")) {
+        return ToneCurvePreset::VividHighlights;
+    }
+    if (normalized == QLatin1String("s_dark_boosted_high")) {
+        return ToneCurvePreset::HighContrast;
+    }
+    return std::nullopt;
+}
+
 QVector<QPointF> generatePresetIntermediatePoints(ToneCurvePreset preset, const PresetCurveParams &params)
 {
     if (preset == ToneCurvePreset::Custom || preset == ToneCurvePreset::Linear || preset == ToneCurvePreset::User) {
+        return {};
+    }
+
+    if (const BuiltInCalibratedCurve *curve = calibratedCurveFor(preset)) {
+        return generateCalibratedIntermediatePoints(*curve, params);
+    }
+
+    if (preset != ToneCurvePreset::Exponential) {
         return {};
     }
 
@@ -167,7 +231,7 @@ QVector<QPointF> generatePresetIntermediatePoints(ToneCurvePreset preset, const 
     points.reserve(kSampleCount);
     for (float t : kSampleFractions) {
         const float x = t * ref;
-        const float y = presetMapping(preset, t) * peak;
+        const float y = exponentialMapping(t) * peak;
         points.append(QPointF(x, y));
     }
 

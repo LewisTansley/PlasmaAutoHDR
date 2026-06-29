@@ -16,6 +16,9 @@ Usage: $(basename "$0") [OPTIONS]
 
 Build and install the kwin4-effect-autohdr KWin effect.
 
+For a full install with dependencies and an interactive KWin restart prompt,
+use ../install.sh from the repository root instead.
+
 Options:
   --clean         Delete build/ and reconfigure from scratch
   --reconfigure   Re-run cmake without deleting build/

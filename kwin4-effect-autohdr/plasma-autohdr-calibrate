@@ -333,6 +333,12 @@ def apply_tone_curve_preset_after_read(settings: dict[str, object], entries: dic
         preset = preset_from_string(entries["ToneCurvePreset"])
         settings["ToneCurvePreset"] = preset_to_string(preset)
         settings["ToneCurveUserPresetId"] = entries.get("ToneCurveUserPresetId", "").strip()
+        if preset == PRESET_USER:
+            migrated = built_in_preset_for_legacy_user_id(str(settings["ToneCurveUserPresetId"]))
+            if migrated is not None:
+                preset = migrated
+                settings["ToneCurvePreset"] = migrated
+                settings["ToneCurveUserPresetId"] = ""
         if preset != PRESET_CUSTOM:
             apply_tone_curve_preset(settings, config_path())
     else:
@@ -714,22 +720,46 @@ def build_tone_curve_lut(
 PRESET_CUSTOM = "custom"
 PRESET_USER = "user"
 PRESET_LINEAR = "linear"
-PRESET_SCURVE = "scurve"
-PRESET_SCURVE_BOOSTED = "scurve_boosted"
-PRESET_SCURVE_LIFTED = "scurve_lifted"
+PRESET_BALANCED = "balanced"
+PRESET_LIFTED_SHADOWS = "lifted_shadows"
+PRESET_SOFT_SHADOWS = "soft_shadows"
+PRESET_VIVID_HIGHLIGHTS = "vivid_highlights"
+PRESET_HIGH_CONTRAST = "high_contrast"
 PRESET_EXPONENTIAL = "exponential"
 
 BUILT_IN_PRESETS = (
     PRESET_LINEAR,
-    PRESET_SCURVE,
-    PRESET_SCURVE_BOOSTED,
-    PRESET_SCURVE_LIFTED,
+    PRESET_BALANCED,
+    PRESET_LIFTED_SHADOWS,
+    PRESET_SOFT_SHADOWS,
+    PRESET_VIVID_HIGHLIGHTS,
+    PRESET_HIGH_CONTRAST,
     PRESET_EXPONENTIAL,
 )
 
+LEGACY_PRESET_ALIASES = {
+    "scurve": PRESET_BALANCED,
+    "scurve_boosted": PRESET_LIFTED_SHADOWS,
+    "scurve_lifted": PRESET_SOFT_SHADOWS,
+}
+
+CALIBRATED_CURVES: dict[str, list[tuple[float, float]]] = {
+    PRESET_BALANCED: [(0.2405, 0.0492), (0.7548, 0.7492)],
+    PRESET_LIFTED_SHADOWS: [(0.2491, 0.1302), (0.7462, 0.7492)],
+    PRESET_SOFT_SHADOWS: [(0.3562, 0.1397), (0.7537, 0.7490)],
+    PRESET_VIVID_HIGHLIGHTS: [(0.3605, 0.1444), (0.7033, 0.7492)],
+    PRESET_HIGH_CONTRAST: [(0.2533, 0.0587), (0.7044, 0.7490)],
+}
+
+LEGACY_USER_PRESET_TO_BUILT_IN = {
+    "s_curve_dark": PRESET_BALANCED,
+    "s_boosted_low": PRESET_LIFTED_SHADOWS,
+    "s_flat_low": PRESET_SOFT_SHADOWS,
+    "s_flat_low_boosted_high": PRESET_VIVID_HIGHLIGHTS,
+    "s_dark_boosted_high": PRESET_HIGH_CONTRAST,
+}
+
 PRESET_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)
-K_SCURVE_BOOST_STRENGTH = 0.65
-K_SCURVE_LIFT_AMOUNT = 0.12
 K_EXPONENTIAL_RATE = 2.4
 
 
@@ -741,15 +771,20 @@ def preset_to_string(preset: str) -> str:
 
 
 def preset_from_string(encoded: str) -> str:
-    return preset_to_string(encoded)
+    normalized = encoded.strip().lower()
+    if normalized in LEGACY_PRESET_ALIASES:
+        return LEGACY_PRESET_ALIASES[normalized]
+    return preset_to_string(normalized)
 
 
 def preset_display_name(preset: str) -> str:
     names = {
         PRESET_LINEAR: "Linear",
-        PRESET_SCURVE: "S-Curve",
-        PRESET_SCURVE_BOOSTED: "S-Curve Boosted",
-        PRESET_SCURVE_LIFTED: "S-Curve Lifted",
+        PRESET_BALANCED: "Balanced",
+        PRESET_LIFTED_SHADOWS: "Lifted Shadows",
+        PRESET_SOFT_SHADOWS: "Soft Shadows",
+        PRESET_VIVID_HIGHLIGHTS: "Vivid Highlights",
+        PRESET_HIGH_CONTRAST: "High Contrast",
         PRESET_EXPONENTIAL: "Exponential",
         PRESET_USER: "User Preset",
         PRESET_CUSTOM: "Custom",
@@ -757,48 +792,40 @@ def preset_display_name(preset: str) -> str:
     return names.get(preset_to_string(preset), "Custom")
 
 
-def _smoothstep(t: float) -> float:
-    t = max(0.0, min(1.0, t))
-    return t * t * (3.0 - 2.0 * t)
+def built_in_preset_for_legacy_user_id(user_preset_id: str) -> str | None:
+    return LEGACY_USER_PRESET_TO_BUILT_IN.get(user_preset_id.strip().lower())
 
 
-def _preset_mapping(preset: str, t: float) -> float:
+def _exponential_mapping(t: float) -> float:
+    import math
+
     t = max(0.0, min(1.0, t))
-    preset = preset_to_string(preset)
-    if preset == PRESET_LINEAR:
+    k = K_EXPONENTIAL_RATE
+    denom = math.exp(k) - 1.0
+    if abs(denom) < 1e-6:
         return t
-    if preset == PRESET_SCURVE:
-        return _smoothstep(t)
-    if preset == PRESET_SCURVE_BOOSTED:
-        s = _smoothstep(t)
-        return t + K_SCURVE_BOOST_STRENGTH * (s - t)
-    if preset == PRESET_SCURVE_LIFTED:
-        return K_SCURVE_LIFT_AMOUNT + (1.0 - K_SCURVE_LIFT_AMOUNT) * _smoothstep(t)
-    if preset == PRESET_EXPONENTIAL:
-        import math
-
-        k = K_EXPONENTIAL_RATE
-        denom = math.exp(k) - 1.0
-        if abs(denom) < 1e-6:
-            return t
-        return (math.exp(k * t) - 1.0) / denom
-    return t
+    return (math.exp(k * t) - 1.0) / denom
 
 
 def generate_preset_intermediate_points(
     preset: str, reference_nits: float, peak_nits: float
 ) -> list[tuple[float, float]]:
-    preset = preset_to_string(preset)
+    preset = preset_from_string(preset)
     if preset in {PRESET_CUSTOM, PRESET_LINEAR, PRESET_USER}:
         return []
 
     ref = max(reference_nits, 1e-3)
     peak = max(peak_nits, ref)
-    points = [
-        (t * ref, _preset_mapping(preset, t) * peak)
-        for t in PRESET_SAMPLE_FRACTIONS
-    ]
-    return sanitize_intermediate_points(points, ref, peak, ref)
+
+    if preset in CALIBRATED_CURVES:
+        points = [(x * ref, y * peak) for x, y in CALIBRATED_CURVES[preset]]
+        return sanitize_intermediate_points(points, ref, peak, ref)
+
+    if preset == PRESET_EXPONENTIAL:
+        points = [(t * ref, _exponential_mapping(t) * peak) for t in PRESET_SAMPLE_FRACTIONS]
+        return sanitize_intermediate_points(points, ref, peak, ref)
+
+    return []
 
 
 def apply_tone_curve_preset(settings: dict[str, object], cfg_path: Path | None = None) -> None:
@@ -1955,7 +1982,8 @@ def verify_tone_curve_invariants() -> None:
     assert abs(lut[62] - evaluate_tone_curve(curve, 50.0)) < 2.0
 
     assert preset_from_string("linear") == PRESET_LINEAR
-    assert preset_from_string("SCURVE_BOOSTED") == PRESET_SCURVE_BOOSTED
+    assert preset_from_string("SCURVE_BOOSTED") == PRESET_LIFTED_SHADOWS
+    assert preset_from_string("scurve") == PRESET_BALANCED
     assert preset_from_string("unknown") == PRESET_CUSTOM
     assert preset_to_string(PRESET_EXPONENTIAL) == PRESET_EXPONENTIAL
 
@@ -1972,34 +2000,48 @@ def verify_tone_curve_invariants() -> None:
         if preset == PRESET_LINEAR:
             continue
         generated = generate_preset_intermediate_points(preset, ref, peak)
-        assert len(generated) == 3, f"{preset} should produce 3 intermediate knots"
+        expected_count = 2 if preset in CALIBRATED_CURVES else 3
+        assert len(generated) == expected_count, f"{preset} should produce {expected_count} intermediate knots"
         ys = [y for _, y in generated]
         assert ys == sorted(ys), f"{preset} intermediate outputs must be monotonic"
         assert ys[-1] < peak, f"{preset} last knot must stay below peak endpoint"
 
-    boosted_settings = {
+    lifted_settings = {
         "ReferenceNits": ref,
         "MaxNits": peak,
-        "ToneCurvePreset": PRESET_SCURVE_BOOSTED,
+        "ToneCurvePreset": PRESET_LIFTED_SHADOWS,
     }
-    apply_tone_curve_preset(boosted_settings)
-    boosted_low_peak = {
+    apply_tone_curve_preset(lifted_settings)
+    lifted_low_peak = {
         "ReferenceNits": ref,
         "MaxNits": 800.0,
-        "ToneCurvePreset": PRESET_SCURVE_BOOSTED,
+        "ToneCurvePreset": PRESET_LIFTED_SHADOWS,
     }
-    apply_tone_curve_preset(boosted_low_peak)
-    boosted_low_points = parse_tone_curve_points(str(boosted_low_peak["ToneCurvePoints"]))
-    boosted_points = parse_tone_curve_points(str(boosted_settings["ToneCurvePoints"]))
-    assert abs(boosted_low_points[1][1] / 800.0 - boosted_points[1][1] / peak) < 0.05
+    apply_tone_curve_preset(lifted_low_peak)
+    lifted_low_points = parse_tone_curve_points(str(lifted_low_peak["ToneCurvePoints"]))
+    lifted_points = parse_tone_curve_points(str(lifted_settings["ToneCurvePoints"]))
+    assert abs(lifted_low_points[1][1] / 800.0 - lifted_points[1][1] / peak) < 0.05
 
     detect_settings = {
         "ReferenceNits": ref,
         "MaxNits": peak,
         "SdrMaxPoint": format_sdr_max_point((ref, peak)),
-        "ToneCurvePoints": boosted_settings["ToneCurvePoints"],
+        "ToneCurvePoints": lifted_settings["ToneCurvePoints"],
     }
-    assert detect_matching_preset(detect_settings) == PRESET_SCURVE_BOOSTED
+    assert detect_matching_preset(detect_settings) == PRESET_LIFTED_SHADOWS
+
+    balanced_settings = {
+        "ReferenceNits": ref,
+        "MaxNits": peak,
+        "ToneCurvePreset": PRESET_BALANCED,
+    }
+    apply_tone_curve_preset(balanced_settings)
+    balanced_points = parse_tone_curve_points(str(balanced_settings["ToneCurvePoints"]))
+    assert len(balanced_points) == 2
+    assert abs(balanced_points[0][0] - 49.0) < 2.0
+    assert abs(balanced_points[0][1] - 49.0) < 2.0
+    assert abs(balanced_points[1][0] - 153.0) < 2.0
+    assert abs(balanced_points[1][1] - 749.0) < 2.0
 
     assert preset_from_string("user") == PRESET_USER
 
@@ -2007,7 +2049,7 @@ def verify_tone_curve_invariants() -> None:
         "ReferenceNits": ref,
         "MaxNits": peak,
         "SdrMaxPoint": format_sdr_max_point((ref, peak)),
-        "ToneCurvePoints": boosted_settings["ToneCurvePoints"],
+        "ToneCurvePoints": lifted_settings["ToneCurvePoints"],
         "ToneCurvePreset": PRESET_CUSTOM,
     }
     normalized = normalize_current_curve(user_source)
@@ -2035,7 +2077,7 @@ def verify_tone_curve_invariants() -> None:
         }
         apply_tone_curve_preset(apply_settings, tmp_cfg)
         applied_points = parse_tone_curve_points(str(apply_settings["ToneCurvePoints"]))
-        source_points = parse_tone_curve_points(str(boosted_settings["ToneCurvePoints"]))
+        source_points = parse_tone_curve_points(str(lifted_settings["ToneCurvePoints"]))
         assert _points_match(applied_points, source_points, 2.0)
 
         scaled_settings = {
@@ -2056,18 +2098,20 @@ def verify_tone_curve_invariants() -> None:
     saved_profile_entries = {
         "ReferenceNits": "203",
         "SdrMaxPoint": format_sdr_max_point((ref, peak)),
-        "ToneCurvePreset": PRESET_SCURVE,
+        "ToneCurvePreset": "scurve",
         "MaxNits": str(int(peak)),
     }
     round_trip = DEFAULT_SETTINGS.copy()
     round_trip["MaxNits"] = peak
     migrate_legacy_settings(round_trip, saved_profile_entries)
     apply_tone_curve_preset_after_read(round_trip, saved_profile_entries)
-    assert round_trip["ToneCurvePreset"] == PRESET_SCURVE, (
-        f"expected {PRESET_SCURVE} without UseToneCurve, got {round_trip['ToneCurvePreset']}"
+    assert round_trip["ToneCurvePreset"] == PRESET_BALANCED, (
+        f"expected {PRESET_BALANCED} for legacy scurve alias, got {round_trip['ToneCurvePreset']}"
     )
-    scurve_points = parse_tone_curve_points(str(round_trip["ToneCurvePoints"]))
-    assert len(scurve_points) == 3, f"S-Curve preset should produce 3 intermediate knots, got {scurve_points}"
+    balanced_round_trip_points = parse_tone_curve_points(str(round_trip["ToneCurvePoints"]))
+    assert len(balanced_round_trip_points) == 2, (
+        f"Balanced preset should produce 2 intermediate knots, got {balanced_round_trip_points}"
+    )
 
     print("verify_tone_curve_invariants: ok")
 

@@ -180,6 +180,13 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     } else if (group.hasKey(QStringLiteral("ToneCurvePreset"))) {
         settings.toneCurvePreset = presetFromString(group.readEntry("ToneCurvePreset"));
         settings.toneCurveUserPresetId = group.readEntry("ToneCurveUserPresetId", QString());
+        if (settings.toneCurvePreset == ToneCurvePreset::User) {
+            if (const std::optional<ToneCurvePreset> migrated =
+                    builtInPresetForLegacyUserId(settings.toneCurveUserPresetId)) {
+                settings.toneCurvePreset = *migrated;
+                settings.toneCurveUserPresetId.clear();
+            }
+        }
         if (settings.toneCurvePreset != ToneCurvePreset::Custom) {
             applyToneCurvePreset(settings, config);
         }

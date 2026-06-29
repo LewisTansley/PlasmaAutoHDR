@@ -5,6 +5,8 @@
 #include <QString>
 #include <QVector>
 
+#include <optional>
+
 namespace AutoHdr {
 
 struct CalibrationSettings;
@@ -12,9 +14,11 @@ struct CalibrationSettings;
 enum class ToneCurvePreset {
     Custom,
     Linear,
-    SCurve,
-    SCurveBoosted,
-    SCurveLifted,
+    Balanced,
+    LiftedShadows,
+    SoftShadows,
+    VividHighlights,
+    HighContrast,
     Exponential,
     User,
 };
@@ -29,6 +33,8 @@ ToneCurvePreset presetFromString(const QString &encoded);
 
 QVector<ToneCurvePreset> builtInToneCurvePresets();
 QString presetDisplayName(ToneCurvePreset preset);
+
+std::optional<ToneCurvePreset> builtInPresetForLegacyUserId(const QString &userPresetId);
 
 QVector<QPointF> generatePresetIntermediatePoints(ToneCurvePreset preset, const PresetCurveParams &params);
 void applyToneCurvePreset(CalibrationSettings &settings, const KSharedConfigPtr &config = KSharedConfigPtr());
