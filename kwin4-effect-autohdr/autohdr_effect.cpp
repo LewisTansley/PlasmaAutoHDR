@@ -478,6 +478,7 @@ namespace KWin {
         m_locHighlightRolloff = m_shader->uniformLocation("highlightRolloff");
         m_locGamutMappingStrength = m_shader->uniformLocation("gamutMappingStrength");
         m_locPostCurveDebandStrength = m_shader->uniformLocation("postCurveDebandStrength");
+        m_locCaptureUsesFloat = m_shader->uniformLocation("captureUsesFloat");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
@@ -502,6 +503,7 @@ namespace KWin {
         AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
 
         ShaderBinder binder(m_shader.get());
+        m_captureUsesFloat = redirectInternalFormat() == GL_RGBA16F ? 1 : 0;
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
         }
@@ -516,6 +518,9 @@ namespace KWin {
         }
         if (m_locPostCurveDebandStrength >= 0) {
             m_shader->setUniform(m_locPostCurveDebandStrength, m_postCurveDebandStrength);
+        }
+        if (m_locCaptureUsesFloat >= 0) {
+            m_shader->setUniform(m_locCaptureUsesFloat, m_captureUsesFloat);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);

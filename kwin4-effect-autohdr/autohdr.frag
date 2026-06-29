@@ -12,6 +12,7 @@ uniform float chromaCompensation;
 uniform float highlightRolloff;
 uniform float gamutMappingStrength;
 uniform float postCurveDebandStrength;
+uniform int captureUsesFloat;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
 uniform float minDisplayNits;
@@ -181,6 +182,9 @@ vec3 debandPostCurveNits(sampler2D tex, vec2 texcoord, vec3 centerNits, float st
 void main()
 {
     vec4 tex = texture(sampler, texcoord0);
+    if (captureUsesFloat == 0) {
+        tex = clamp(tex, 0.0, 1.0);
+    }
 
     tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
     tex.rgb = (colorimetryTransform * vec4(tex.rgb, 1.0)).rgb;
