@@ -17,9 +17,12 @@ vec3 iCtCpToLinear(vec3 ictcp)
     return (lmsToDestination * vec4(pqToLinear(fromICtCp * ictcp), 1.0)).rgb * 10000.0;
 }
 
-float adaptiveShadowRolloff(float t)
+float adaptiveShadowRolloff(float t, float minDisplayNits, float refNits)
 {
-    const float toeEnd = 5.0 / 255.0;
+    float ref = max(refNits, 1.0);
+    float displayFloor = max(minDisplayNits / ref, 0.0);
+    float sdrToe = 5.0 / 255.0;
+    float toeEnd = max(sdrToe, displayFloor);
     float u = clamp(t / toeEnd, 0.0, 1.0);
     float toe = toeEnd * u * u * (3.0 - 2.0 * u);
     return mix(toe, t, step(toeEnd + 1e-6, t));
@@ -50,6 +53,78 @@ vec3 applyICtCpToneCurve(vec3 rgbNits, float targetLumaNits, float sourceLumaNit
     return result;
 }
 
+vec3 autohdrApplyChromaCompensation(vec3 rgbNits, float targetLumaNits, float sourceLumaNits, float strength)
+{
+    if (strength <= 0.0) {
+        return rgbNits;
+    }
+
+    float lumaRatio = targetLumaNits / max(sourceLumaNits, 1e-4);
+    if (lumaRatio <= 1.0) {
+        return rgbNits;
+    }
+
+    vec3 ictcp = linearToICtCp(rgbNits);
+    float highlightFalloff = 1.0 - smoothstep(1.0, 2.5, lumaRatio);
+    float chromaBoost = 1.0 + 0.2 * strength * (lumaRatio - 1.0) * highlightFalloff;
+    ictcp.yz *= chromaBoost;
+    return max(iCtCpToLinear(ictcp), vec3(0.0));
+}
+
+vec3 compressHighlightsICtCp(vec3 rgbNits, float kneeNits, float peakNits, float rolloff)
+{
+    if (rolloff <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = dot(rgbNits, AUTOHDR_LUMA);
+    float blend = smoothstep(kneeNits * 0.95, kneeNits * 1.05, luma);
+    if (blend <= 0.0) {
+        return rgbNits;
+    }
+
+    vec3 compressed = rgbNits;
+    if (luma > kneeNits) {
+        vec3 ictcp = linearToICtCp(rgbNits);
+        float Igray = linearToICtCp(vec3(luma)).x;
+        float IgrayKnee = linearToICtCp(vec3(kneeNits)).x;
+        float IgrayPeak = linearToICtCp(vec3(peakNits)).x;
+
+        if (Igray > IgrayKnee && IgrayPeak > IgrayKnee) {
+            float excess = (Igray - IgrayKnee) / max(IgrayPeak - IgrayKnee, 1e-4);
+            float rolled = excess / (1.0 + rolloff * 3.0 * excess);
+            float IgrayOut = IgrayKnee + rolled * (IgrayPeak - IgrayKnee);
+            ictcp.x += (IgrayOut - Igray);
+            compressed = max(iCtCpToLinear(ictcp), vec3(0.0));
+        }
+    }
+
+    return mix(rgbNits, compressed, blend);
+}
+
+vec3 mapToDisplayGamutICtCp(vec3 rgbNits, float strength)
+{
+    if (strength <= 0.0) {
+        return rgbNits;
+    }
+
+    vec3 ictcp = linearToICtCp(rgbNits);
+    float chroma = length(ictcp.yz);
+    if (chroma <= 1e-4) {
+        return rgbNits;
+    }
+
+    const float maxChroma = 0.5;
+    if (chroma <= maxChroma) {
+        return rgbNits;
+    }
+
+    float scale = maxChroma / chroma;
+    float mapped = mix(1.0, scale, smoothstep(maxChroma, maxChroma * 1.5, chroma) * strength);
+    ictcp.yz *= mapped;
+    return max(iCtCpToLinear(ictcp), vec3(0.0));
+}
+
 vec3 reconstructHighlights(vec3 rgbNits, float refNits)
 {
     vec3 rel = rgbNits / max(refNits, 1.0);
@@ -71,6 +146,60 @@ vec3 reconstructHighlights(vec3 rgbNits, float refNits)
     float unclippedLuma = dot(unclipped, AUTOHDR_LUMA);
     vec3 reconstructed = unclipped * (luma / max(unclippedLuma, 1e-4));
     return mix(rel, reconstructed, clipMask) * refNits;
+}
+
+vec3 reconstructHighlightsSpatial(sampler2D tex, vec2 texcoord, vec3 rgbNits, float refNits, ivec2 texSize,
+                                  float sourceWhite, float strength, int captureUsesFloat)
+{
+    vec3 base = reconstructHighlights(rgbNits, refNits);
+    if (strength <= 0.0 || texSize.x <= 0 || texSize.y <= 0) {
+        return base;
+    }
+
+    vec3 rel = rgbNits / max(refNits, 1.0);
+    float peak = max(max(rel.r, rel.g), rel.b);
+    if (peak <= 0.98) {
+        return base;
+    }
+
+    ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+    vec3 hueAccum = vec3(0.0);
+    float weight = 0.0;
+
+    const ivec2 offsets[8] = ivec2[8](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+        ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1)
+    );
+
+    for (int i = 0; i < 8; ++i) {
+        ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
+        vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
+        vec4 nSample = texture(tex, nuv);
+        if (captureUsesFloat == 0) {
+            nSample = clamp(nSample, 0.0, 1.0);
+        }
+        nSample = encodingToNits(nSample, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                               sourceTransferFunctionParams.y);
+        nSample.rgb = (colorimetryTransform * vec4(nSample.rgb, 1.0)).rgb;
+        nSample.rgb *= refNits / max(sourceWhite, 1.0);
+        vec3 nRel = nSample.rgb / max(nSample.a, 0.001) / refNits;
+        float nPeak = max(max(nRel.r, nRel.g), nRel.b);
+        if (nPeak < 0.95) {
+            vec3 hue = nRel / max(nPeak, 1e-4);
+            hueAccum += hue;
+            weight += 1.0;
+        }
+    }
+
+    if (weight <= 0.0) {
+        return base;
+    }
+
+    vec3 avgHue = hueAccum / weight;
+    float luma = dot(rel, AUTOHDR_LUMA);
+    vec3 spatial = avgHue * luma;
+    float clipMask = smoothstep(0.95, 0.99, peak);
+    return mix(base, spatial * refNits, clipMask * strength * 0.5);
 }
 
 vec3 autohdrRec709ToXYZ(vec3 linearRec709)
@@ -157,6 +286,21 @@ vec3 debandNeighbors(vec3 centerRel, vec3 neighborRel, float strength)
                * isBandStep(neighborRel.g - centerRel.g)
                * isBandStep(neighborRel.b - centerRel.b);
     return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
+}
+
+float isPostCurveBandStep(float delta, float refNits)
+{
+    float bandStep = max(refNits * 0.001, 1.0) / max(refNits, 1.0);
+    float d = abs(delta);
+    return step(bandStep * 0.5, d) * (1.0 - step(bandStep * 1.5, d));
+}
+
+vec3 debandPostCurve(vec3 centerRel, vec3 neighborRel, float strength, float refNits)
+{
+    float band = isPostCurveBandStep(neighborRel.r - centerRel.r, refNits)
+               * isPostCurveBandStep(neighborRel.g - centerRel.g, refNits)
+               * isPostCurveBandStep(neighborRel.b - centerRel.b, refNits);
+    return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength * 0.5);
 }
 
 float ign(vec2 p)

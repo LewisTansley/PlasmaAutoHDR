@@ -19,6 +19,9 @@ struct CalibrationSettings {
     float blackPoint = 0.0f;
     float vibrance = 0.0f;
     float referenceNits = 203.0f;
+    float chromaCompensation = 0.0f;
+    float highlightRolloff = 0.0f;
+    float gamutMappingStrength = 0.0f;
     QPointF sdrMaxPoint;
     QVector<QPointF> toneCurvePoints;
     ToneCurvePreset toneCurvePreset = ToneCurvePreset::Linear;
@@ -32,6 +35,10 @@ float clampReferenceNits(float value);
 float clampBlackPoint(float value);
 float clampVibrance(float value);
 float clampGamutExpansion(float value);
+float clampChromaCompensation(float value);
+float clampHighlightRolloff(float value);
+float clampGamutMappingStrength(float value);
+float clampPostCurveDebandStrength(float value);
 
 struct AppProfileMetadata {
     QString key;
@@ -49,6 +56,13 @@ struct AppProfile {
 
 struct GeneralSettings {
     bool autoActivateCalibrated = true;
+    int processingQuality = 0;
+    float debandStrength = 0.25f;
+    float ditherStrength = 0.15f / 255.0f;
+    float postCurveDebandStrength = 0.0f;
+    bool spatialHighlightRecovery = false;
+    bool preferFloatCapture = false;
+    bool useReferenceToneCurve = false;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

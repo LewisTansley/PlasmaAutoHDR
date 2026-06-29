@@ -38,6 +38,7 @@ namespace {
 struct HdrDisplayLimits {
     int referenceNits = 100;
     int maxDisplayNits = 1000;
+    int minDisplayNits = 0;
 };
 
 HdrDisplayLimits readHdrDisplayLimits()
@@ -46,6 +47,7 @@ HdrDisplayLimits readHdrDisplayLimits()
     HdrDisplayLimits limits;
     limits.referenceNits = qMax(1, qRound(hdrGroup.readEntry("Reference", 100.0f)));
     limits.maxDisplayNits = qMax(limits.referenceNits + 1, qRound(hdrGroup.readEntry("MaxLuminance", 1000.0f)));
+    limits.minDisplayNits = qMax(0, qRound(hdrGroup.readEntry("MinLuminance", 0.0f)));
 
     const QString outputConfigPath =
         QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/kwinoutputconfig.json");
@@ -62,6 +64,10 @@ HdrDisplayLimits readHdrDisplayLimits()
                 const int peakOverride = output.value(QStringLiteral("maxPeakBrightnessOverride")).toInt(0);
                 if (peakOverride > limits.maxDisplayNits) {
                     limits.maxDisplayNits = peakOverride;
+                }
+                const int minOverride = output.value(QStringLiteral("minLuminance")).toInt(0);
+                if (minOverride > limits.minDisplayNits) {
+                    limits.minDisplayNits = minOverride;
                 }
             }
         }
@@ -159,6 +165,7 @@ namespace KWin {
     {
         Q_UNUSED(flags)
         m_config->reparseConfiguration();
+        m_redirectInternalFormat = 0;
         loadGlobalDefaults(false);
         reevaluateAllWindows();
     }
@@ -360,6 +367,7 @@ namespace KWin {
         const HdrDisplayLimits limits = readHdrDisplayLimits();
         m_hdrReferenceNits = static_cast<float>(limits.referenceNits);
         m_hdrMaxDisplayNits = static_cast<float>(limits.maxDisplayNits);
+        m_hdrMinDisplayNits = static_cast<float>(limits.minDisplayNits);
     }
 
     void AutoHDREffect::sanitizeGlobalDefaults(bool persist)
@@ -377,7 +385,15 @@ namespace KWin {
         reloadHdrDisplayLimits();
 
         m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits);
-        m_autoActivateCalibrated = AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated;
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivateCalibrated = general.autoActivateCalibrated;
+        m_processingQuality = general.processingQuality;
+        m_debandStrength = general.debandStrength;
+        m_ditherStrength = general.ditherStrength;
+        m_postCurveDebandStrength = general.postCurveDebandStrength;
+        m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
+        m_preferFloatCapture = general.preferFloatCapture;
+        m_useReferenceToneCurve = general.useReferenceToneCurve;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -425,9 +441,18 @@ namespace KWin {
         const AutoHdr::ToneCurveEndpoints endpoints =
             AutoHdr::toneCurveEndpointsFor(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
         const QVector<QPointF> fullCurve = AutoHdr::buildFullCurve(endpoints, sanitized.toneCurvePoints);
-        const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
-        m_cachedToneCurveInputSpan = inputSpan;
-        AutoHdr::buildToneCurveLut(fullCurve, inputSpan, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        if (m_useReferenceToneCurve) {
+            const float inputSpan = qMax(endpoints.peakNits, qMax(endpoints.visualReferenceNits, 1.0f));
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = sanitized.referenceNits;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, sanitized.referenceNits, m_toneCurveLut,
+                                       AutoHdr::kToneCurveLutSize);
+        } else {
+            const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
+            m_cachedToneCurveInputSpan = inputSpan;
+            m_cachedToneCurveReferenceNits = 0.0f;
+            AutoHdr::buildToneCurveLut(fullCurve, inputSpan, 0.0f, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        }
         m_toneCurveLutDirty = true;
     }
 
@@ -446,6 +471,9 @@ namespace KWin {
         if (m_locToneCurveInputSpan >= 0) {
             m_shader->setUniform(m_locToneCurveInputSpan, m_cachedToneCurveInputSpan);
         }
+        if (m_locToneCurveReferenceNits >= 0) {
+            m_shader->setUniform(m_locToneCurveReferenceNits, m_cachedToneCurveReferenceNits);
+        }
         m_toneCurveLutDirty = false;
     }
 
@@ -457,9 +485,17 @@ namespace KWin {
 
         ShaderBinder binder(m_shader.get());
         m_locGamutExpansion = m_shader->uniformLocation("gamutExpansion");
+        m_locChromaCompensation = m_shader->uniformLocation("chromaCompensation");
+        m_locHighlightRolloff = m_shader->uniformLocation("highlightRolloff");
+        m_locGamutMappingStrength = m_shader->uniformLocation("gamutMappingStrength");
+        m_locPostCurveDebandStrength = m_shader->uniformLocation("postCurveDebandStrength");
+        m_locCaptureUsesFloat = m_shader->uniformLocation("captureUsesFloat");
+        m_locSpatialHighlightRecovery = m_shader->uniformLocation("spatialHighlightRecovery");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
+        m_locToneCurveReferenceNits = m_shader->uniformLocation("toneCurveReferenceNits");
+        m_locMinDisplayNits = m_shader->uniformLocation("minDisplayNits");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
@@ -479,14 +515,36 @@ namespace KWin {
         AutoHdr::sanitizeCalibrationSettings(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
 
         ShaderBinder binder(m_shader.get());
+        m_captureUsesFloat = redirectInternalFormat() == GL_RGBA16F ? 1 : 0;
         if (m_locGamutExpansion >= 0) {
             m_shader->setUniform(m_locGamutExpansion, sanitized.gamutExpansion);
+        }
+        if (m_locChromaCompensation >= 0) {
+            m_shader->setUniform(m_locChromaCompensation, sanitized.chromaCompensation);
+        }
+        if (m_locHighlightRolloff >= 0) {
+            m_shader->setUniform(m_locHighlightRolloff, sanitized.highlightRolloff);
+        }
+        if (m_locGamutMappingStrength >= 0) {
+            m_shader->setUniform(m_locGamutMappingStrength, sanitized.gamutMappingStrength);
+        }
+        if (m_locPostCurveDebandStrength >= 0) {
+            m_shader->setUniform(m_locPostCurveDebandStrength, m_postCurveDebandStrength);
+        }
+        if (m_locCaptureUsesFloat >= 0) {
+            m_shader->setUniform(m_locCaptureUsesFloat, m_captureUsesFloat);
+        }
+        if (m_locSpatialHighlightRecovery >= 0) {
+            m_shader->setUniform(m_locSpatialHighlightRecovery, m_spatialHighlightRecovery);
         }
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);
         }
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
+        }
+        if (m_locMinDisplayNits >= 0) {
+            m_shader->setUniform(m_locMinDisplayNits, m_hdrMinDisplayNits);
         }
         if (m_locDebandStrength >= 0) {
             m_shader->setUniform(m_locDebandStrength, m_debandStrength);
@@ -577,11 +635,18 @@ namespace KWin {
         }
 
         m_redirectInternalFormat = GL_RGBA8;
-        if (qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")) {
+
+        const bool forceFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
+            && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") != 0;
+        const bool force8Bit = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
+            && qEnvironmentVariableIntValue("AUTOHDR_FLOAT_FBO") == 0;
+        const bool preferFloat = !force8Bit && (forceFloat || m_preferFloatCapture);
+
+        if (preferFloat) {
             if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
                 m_redirectInternalFormat = GL_RGBA16F;
             } else {
-                qWarning() << "AutoHDR Effect: AUTOHDR_FLOAT_FBO set but GL_RGBA16F unavailable";
+                qWarning() << "AutoHDR Effect: GL_RGBA16F unavailable, falling back to GL_RGBA8";
             }
         }
 

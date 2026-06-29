@@ -6,7 +6,7 @@
 
 namespace AutoHdr {
 
-constexpr int kToneCurveLutSize = 256;
+constexpr int kToneCurveLutSize = 512;
 
 struct ToneCurveEndpoints {
     float peakNits = 1000.0f;
@@ -23,7 +23,7 @@ QPointF sanitizeSdrMaxPoint(const QPointF &point, const ToneCurveEndpoints &endp
 
 float evaluateToneCurve(const QVector<QPointF> &fullCurve, float inputNits);
 
-void buildToneCurveLut(const QVector<QPointF> &fullCurve, float inputSpan, float *lut, int size);
+void buildToneCurveLut(const QVector<QPointF> &fullCurve, float inputSpan, float referenceNits, float *lut, int size);
 
 QString formatToneCurvePoints(const QVector<QPointF> &points);
 
