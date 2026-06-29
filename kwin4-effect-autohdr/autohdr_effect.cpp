@@ -384,7 +384,11 @@ namespace KWin {
         reloadHdrDisplayLimits();
 
         m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits);
-        m_autoActivateCalibrated = AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated;
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivateCalibrated = general.autoActivateCalibrated;
+        m_processingQuality = general.processingQuality;
+        m_debandStrength = general.debandStrength;
+        m_ditherStrength = general.ditherStrength;
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }

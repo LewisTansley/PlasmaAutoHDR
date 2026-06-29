@@ -13,6 +13,7 @@
 #include <KSharedConfig>
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDoubleSpinBox>
@@ -106,6 +107,28 @@ public:
 
         layout->addWidget(defaultsGroup);
 
+        auto *processingGroup = new QGroupBox(i18n("Processing"), widget());
+        auto *processingLayout = new QFormLayout(processingGroup);
+
+        m_processingQuality = new QComboBox(processingGroup);
+        m_processingQuality->addItem(i18n("Fast"), 0);
+        m_processingQuality->addItem(i18n("Balanced"), 1);
+        m_processingQuality->addItem(i18n("Quality"), 2);
+        processingLayout->addRow(i18n("Processing quality:"), m_processingQuality);
+
+        m_debandStrength = new QDoubleSpinBox(processingGroup);
+        m_debandStrength->setRange(0.0, 1.0);
+        m_debandStrength->setSingleStep(0.05);
+        processingLayout->addRow(i18n("Deband strength:"), m_debandStrength);
+
+        m_ditherStrength = new QDoubleSpinBox(processingGroup);
+        m_ditherStrength->setRange(0.0, 1.0);
+        m_ditherStrength->setDecimals(5);
+        m_ditherStrength->setSingleStep(0.001);
+        processingLayout->addRow(i18n("Dither strength:"), m_ditherStrength);
+
+        layout->addWidget(processingGroup);
+
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
         layout->addWidget(m_autoActivate);
 
@@ -126,6 +149,9 @@ public:
 
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
+        connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
+        connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
     }
 
     void load() override
@@ -148,6 +174,13 @@ public:
                                      globals.gamutMappingStrength);
 
         m_autoActivate->setChecked(AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated);
+
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivate->setChecked(general.autoActivateCalibrated);
+        const int qualityIndex = m_processingQuality->findData(general.processingQuality);
+        m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
+        m_debandStrength->setValue(general.debandStrength);
+        m_ditherStrength->setValue(general.ditherStrength);
 
         rebuildAppsTable();
     }
@@ -193,6 +226,9 @@ public:
 
         AutoHdr::GeneralSettings general;
         general.autoActivateCalibrated = m_autoActivate->isChecked();
+        general.processingQuality = m_processingQuality->currentData().toInt();
+        general.debandStrength = static_cast<float>(m_debandStrength->value());
+        general.ditherStrength = static_cast<float>(m_ditherStrength->value());
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -269,6 +305,9 @@ private:
 
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
+    QComboBox *m_processingQuality = nullptr;
+    QDoubleSpinBox *m_debandStrength = nullptr;
+    QDoubleSpinBox *m_ditherStrength = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;

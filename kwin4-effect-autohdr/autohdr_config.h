@@ -55,6 +55,9 @@ struct AppProfile {
 
 struct GeneralSettings {
     bool autoActivateCalibrated = true;
+    int processingQuality = 0;
+    float debandStrength = 0.25f;
+    float ditherStrength = 0.15f / 255.0f;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

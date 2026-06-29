@@ -160,6 +160,9 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     GeneralSettings general;
     const KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     general.autoActivateCalibrated = group.readEntry("AutoActivateCalibrated", true);
+    general.processingQuality = qBound(0, group.readEntry("ProcessingQuality", 0), 2);
+    general.debandStrength = qBound(0.0f, static_cast<float>(group.readEntry("DebandStrength", 0.25)), 1.0f);
+    general.ditherStrength = qBound(0.0f, static_cast<float>(group.readEntry("DitherStrength", 0.15 / 255.0)), 1.0f);
     return general;
 }
 
@@ -167,6 +170,9 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
 {
     KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     group.writeEntry("AutoActivateCalibrated", general.autoActivateCalibrated);
+    group.writeEntry("ProcessingQuality", general.processingQuality);
+    group.writeEntry("DebandStrength", general.debandStrength);
+    group.writeEntry("DitherStrength", general.ditherStrength);
     config->sync();
 }
 
