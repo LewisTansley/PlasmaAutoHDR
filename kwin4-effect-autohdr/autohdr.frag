@@ -10,6 +10,7 @@ uniform float colorVibrance;
 uniform float gamutExpansion;
 uniform float toneCurveInputSpan;
 uniform float toneCurveReferenceNits;
+uniform float minDisplayNits;
 uniform float toneCurveLut[512];
 uniform float debandStrength;
 uniform float ditherStrength;
@@ -141,7 +142,7 @@ void main()
 
     float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;
-    t = adaptiveShadowRolloff(t);
+    t = adaptiveShadowRolloff(t, minDisplayNits, ref);
     t = applyUserBlackPoint(t, blackPoint);
 
     float curveRef = toneCurveReferenceNits > 1.0 ? toneCurveReferenceNits : ref;

@@ -17,9 +17,12 @@ vec3 iCtCpToLinear(vec3 ictcp)
     return (lmsToDestination * vec4(pqToLinear(fromICtCp * ictcp), 1.0)).rgb * 10000.0;
 }
 
-float adaptiveShadowRolloff(float t)
+float adaptiveShadowRolloff(float t, float minDisplayNits, float refNits)
 {
-    const float toeEnd = 5.0 / 255.0;
+    float ref = max(refNits, 1.0);
+    float displayFloor = max(minDisplayNits / ref, 0.0);
+    float sdrToe = 5.0 / 255.0;
+    float toeEnd = max(sdrToe, displayFloor);
     float u = clamp(t / toeEnd, 0.0, 1.0);
     float toe = toeEnd * u * u * (3.0 - 2.0 * u);
     return mix(toe, t, step(toeEnd + 1e-6, t));

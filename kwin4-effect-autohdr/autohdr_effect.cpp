@@ -38,6 +38,7 @@ namespace {
 struct HdrDisplayLimits {
     int referenceNits = 100;
     int maxDisplayNits = 1000;
+    int minDisplayNits = 0;
 };
 
 HdrDisplayLimits readHdrDisplayLimits()
@@ -46,6 +47,7 @@ HdrDisplayLimits readHdrDisplayLimits()
     HdrDisplayLimits limits;
     limits.referenceNits = qMax(1, qRound(hdrGroup.readEntry("Reference", 100.0f)));
     limits.maxDisplayNits = qMax(limits.referenceNits + 1, qRound(hdrGroup.readEntry("MaxLuminance", 1000.0f)));
+    limits.minDisplayNits = qMax(0, qRound(hdrGroup.readEntry("MinLuminance", 0.0f)));
 
     const QString outputConfigPath =
         QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/kwinoutputconfig.json");
@@ -62,6 +64,10 @@ HdrDisplayLimits readHdrDisplayLimits()
                 const int peakOverride = output.value(QStringLiteral("maxPeakBrightnessOverride")).toInt(0);
                 if (peakOverride > limits.maxDisplayNits) {
                     limits.maxDisplayNits = peakOverride;
+                }
+                const int minOverride = output.value(QStringLiteral("minLuminance")).toInt(0);
+                if (minOverride > limits.minDisplayNits) {
+                    limits.minDisplayNits = minOverride;
                 }
             }
         }
@@ -360,6 +366,7 @@ namespace KWin {
         const HdrDisplayLimits limits = readHdrDisplayLimits();
         m_hdrReferenceNits = static_cast<float>(limits.referenceNits);
         m_hdrMaxDisplayNits = static_cast<float>(limits.maxDisplayNits);
+        m_hdrMinDisplayNits = static_cast<float>(limits.minDisplayNits);
     }
 
     void AutoHDREffect::sanitizeGlobalDefaults(bool persist)
@@ -466,6 +473,7 @@ namespace KWin {
         m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
         m_locToneCurveReferenceNits = m_shader->uniformLocation("toneCurveReferenceNits");
+        m_locMinDisplayNits = m_shader->uniformLocation("minDisplayNits");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
@@ -493,6 +501,9 @@ namespace KWin {
         }
         if (m_locColorVibrance >= 0) {
             m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
+        }
+        if (m_locMinDisplayNits >= 0) {
+            m_shader->setUniform(m_locMinDisplayNits, m_hdrMinDisplayNits);
         }
         if (m_locDebandStrength >= 0) {
             m_shader->setUniform(m_locDebandStrength, m_debandStrength);

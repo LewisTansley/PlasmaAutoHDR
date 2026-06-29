@@ -125,12 +125,14 @@ namespace KWin {
         CalibrationSettings m_globalDefaults;
         float m_hdrReferenceNits = 100.0f;
         float m_hdrMaxDisplayNits = 1000.0f;
+        float m_hdrMinDisplayNits = 0.0f;
 
         int m_locGamutExpansion = -1;
         int m_locBlackPoint = -1;
         int m_locColorVibrance = -1;
         int m_locToneCurveInputSpan = -1;
         int m_locToneCurveReferenceNits = -1;
+        int m_locMinDisplayNits = -1;
         int m_locToneCurveLut = -1;
         int m_locDebandStrength = -1;
         int m_locDitherStrength = -1;
