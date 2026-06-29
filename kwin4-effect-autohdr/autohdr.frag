@@ -8,8 +8,12 @@ uniform vec4 modulation;
 uniform float blackPoint;
 uniform float colorVibrance;
 uniform float gamutExpansion;
+uniform float highlightRolloff;
+uniform float chromaCompensation;
 uniform float toneCurveInputSpan;
-uniform float toneCurveLut[256];
+uniform float toneCurveReferenceNits;
+uniform float minDisplayNits;
+uniform float toneCurveLut[512];
 uniform float debandStrength;
 uniform float ditherStrength;
 uniform int processingQuality;
@@ -21,13 +25,28 @@ out vec4 fragColor;
 
 #include "autohdr_color.glsl"
 
-float mapToneCurve(float inputNits, float inputSpan)
+float toneCurveU(float inputNits, float inputSpan, float referenceNits)
 {
     float span = max(inputSpan, 1e-3);
-    float u = clamp(inputNits / span, 0.0, 1.0);
-    float idx = u * 255.0;
+    float ref = max(min(referenceNits, span), 1e-3);
+    inputNits = clamp(inputNits, 0.0, span);
+
+    if (inputNits <= ref) {
+        return (inputNits / ref) * 0.5;
+    }
+
+    float logRef = log(ref);
+    float logSpan = log(span);
+    float t = (log(inputNits) - logRef) / max(logSpan - logRef, 1e-4);
+    return 0.5 + t * 0.5;
+}
+
+float mapToneCurve(float inputNits, float inputSpan, float referenceNits)
+{
+    float u = toneCurveU(inputNits, inputSpan, referenceNits);
+    float idx = u * 511.0;
     int i0 = int(floor(idx));
-    int i1 = min(i0 + 1, 255);
+    int i1 = min(i0 + 1, 511);
     float f = fract(idx);
     return mix(toneCurveLut[i0], toneCurveLut[i1], f);
 }
@@ -49,6 +68,7 @@ vec3 applyColorControls(vec3 rgb, float sat, float vib)
 vec3 sampleSdrRel(sampler2D tex, vec2 uv, float ref, float sourceWhite)
 {
     vec4 texSample = texture(tex, uv);
+    texSample = clamp(texSample, 0.0, 1.0);
     float alpha = max(texSample.a, 0.001);
     texSample = encodingToNits(texSample, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
                              sourceTransferFunctionParams.y);
@@ -89,12 +109,14 @@ vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, 
 void main()
 {
     vec4 tex = texture(sampler, texcoord0);
+    tex = clamp(tex, 0.0, 1.0);
 
     tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
     tex.rgb = (colorimetryTransform * vec4(tex.rgb, 1.0)).rgb;
 
     float ref = max(destinationReferenceLuminance, 1.0);
     float displayPeak = max(maxDestinationLuminance, ref);
+    float curveRef = toneCurveReferenceNits > 1.0 ? toneCurveReferenceNits : ref;
 
     float sourceWhite = max(sourceTransferFunctionParams.x + sourceTransferFunctionParams.y, 1.0);
     tex.rgb *= ref / sourceWhite;
@@ -103,38 +125,42 @@ void main()
     vec3 rgb = tex.rgb / alpha;
 
     float deband = processingQuality > 0 ? debandStrength : 0.0;
-    if (deband > 0.0 && textureWidth > 0 && textureHeight > 0) {
-        ivec2 texSize = ivec2(textureWidth, textureHeight);
+    ivec2 texSize = ivec2(textureWidth, textureHeight);
+    if (deband > 0.0 && texSize.x > 0 && texSize.y > 0) {
         vec3 centerRel = rgb / ref;
         centerRel = debandSdrRel(sampler, texcoord0, centerRel, deband, texSize, ref, sourceWhite);
         rgb = centerRel * ref;
     }
 
-    rgb = reconstructHighlights(rgb, ref);
+    if (processingQuality >= 2 && texSize.x > 0 && texSize.y > 0) {
+        rgb = reconstructHighlightsSpatial(sampler, texcoord0, rgb, ref, texSize, sourceWhite, processingQuality);
+    } else {
+        rgb = reconstructHighlights(rgb, ref);
+    }
 
     float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;
-    t = adaptiveShadowRolloff(t);
+    t = adaptiveShadowRolloff(t, minDisplayNits, ref);
     t = applyUserBlackPoint(t, blackPoint);
 
-    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
-    float correctedNits = t * ref;
-    float Yn = mapToneCurve(correctedNits, curveSpan);
-    rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
+    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : curveRef;
+    float curveScale = curveRef / max(ref, 1e-3);
+    float correctedNits = lumaNits * curveScale;
+    float Yn = mapToneCurve(correctedNits, curveSpan, curveRef);
+    rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref, chromaCompensation);
 
     if (gamutExpansion > 0.0) {
         rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+        rgb = mapToDisplayGamutICtCp(rgb);
     }
 
     vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);
     rgb = sceneMapped * ref;
 
-    float outLuma = dot(rgb, AUTOHDR_LUMA);
-    if (outLuma > displayPeak) {
-        rgb *= displayPeak / outLuma;
-    }
+    float kneeNits = displayPeak * 0.85;
+    rgb = compressHighlightsICtCp(rgb, kneeNits, displayPeak, highlightRolloff);
 
-    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref);
+    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, processingQuality);
 
     tex.rgb = max(rgb * alpha, vec3(0.0));
     tex *= modulation;

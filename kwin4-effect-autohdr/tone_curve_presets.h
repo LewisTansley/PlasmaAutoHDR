@@ -20,6 +20,8 @@ enum class ToneCurvePreset {
     VividHighlights,
     HighContrast,
     Exponential,
+    Bt2446MethodA,
+    Bt2446MethodB,
     User,
 };
 

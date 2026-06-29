@@ -21,6 +21,8 @@ CONFIG_KEYS = (
     "BlackPoint",
     "Vibrance",
     "ReferenceNits",
+    "HighlightRolloff",
+    "ChromaCompensation",
     "SdrMaxPoint",
     "ToneCurvePoints",
     "ToneCurvePreset",
@@ -41,6 +43,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "BlackPoint": 0.0,
     "Vibrance": 0.0,
     "ReferenceNits": 203.0,
+    "HighlightRolloff": 0.5,
+    "ChromaCompensation": 0.35,
     "SdrMaxPoint": "",
     "ToneCurvePoints": "",
     "ToneCurvePreset": "linear",
@@ -49,7 +53,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
 
 REFERENCE_NITS_MIN = 80.0
 REFERENCE_NITS_MAX = 480.0
-TONE_CURVE_LUT_SIZE = 256
+TONE_CURVE_LUT_SIZE = 512
 PLOT_SIZE = 280
 PLOT_LABEL_TOP = 18
 PLOT_LABEL_BOTTOM = 20
@@ -292,6 +296,8 @@ def sanitize_settings(settings: dict[str, object], reference: int, max_nits: int
     result["Vibrance"] = clamp_vibrance(float(result["Vibrance"]))
     result["GamutExpansion"] = clamp_gamut_expansion(float(result["GamutExpansion"]))
     result["BlackPoint"] = clamp_black(float(result["BlackPoint"]))
+    result["HighlightRolloff"] = clamp_highlight_rolloff(float(result.get("HighlightRolloff", 0.5)))
+    result["ChromaCompensation"] = clamp_chroma_compensation(float(result.get("ChromaCompensation", 0.35)))
     peak = float(result["MaxNits"])
     preset = preset_from_string(str(result.get("ToneCurvePreset", "custom")))
     result["ToneCurvePreset"] = preset_to_string(preset)
@@ -477,6 +483,14 @@ def clamp_vibrance(value: float) -> float:
 
 def clamp_gamut_expansion(value: float) -> float:
     return max(0.0, min(20.0, value))
+
+
+def clamp_highlight_rolloff(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def clamp_chroma_compensation(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def clamp_reference_nits(value: float) -> float:
@@ -707,13 +721,23 @@ def evaluate_tone_curve(points: list[tuple[float, float]], input_nits: float) ->
 
 
 def build_tone_curve_lut(
-    points: list[tuple[float, float]], input_span: float, size: int = 256
+    points: list[tuple[float, float]], input_span: float, size: int = 512, reference_nits: float | None = None
 ) -> list[float]:
+    import math
+
     span = max(input_span, 1e-3)
+    ref = max(min(reference_nits or span, span), 1e-3)
+    log_ref = math.log(ref)
+    log_span = math.log(span)
     lut: list[float] = []
     for i in range(size):
         u = i / (size - 1) if size > 1 else 0.0
-        lut.append(evaluate_tone_curve(points, u * span))
+        if u <= 0.5:
+            input_nits = (u / 0.5) * ref
+        else:
+            t = (u - 0.5) / 0.5
+            input_nits = math.exp(log_ref + t * (log_span - log_ref))
+        lut.append(evaluate_tone_curve(points, input_nits))
     return lut
 
 
@@ -726,6 +750,8 @@ PRESET_SOFT_SHADOWS = "soft_shadows"
 PRESET_VIVID_HIGHLIGHTS = "vivid_highlights"
 PRESET_HIGH_CONTRAST = "high_contrast"
 PRESET_EXPONENTIAL = "exponential"
+PRESET_BT2446_A = "bt2446_a"
+PRESET_BT2446_B = "bt2446_b"
 
 BUILT_IN_PRESETS = (
     PRESET_LINEAR,
@@ -735,6 +761,8 @@ BUILT_IN_PRESETS = (
     PRESET_VIVID_HIGHLIGHTS,
     PRESET_HIGH_CONTRAST,
     PRESET_EXPONENTIAL,
+    PRESET_BT2446_A,
+    PRESET_BT2446_B,
 )
 
 LEGACY_PRESET_ALIASES = {
@@ -765,7 +793,7 @@ K_EXPONENTIAL_RATE = 2.4
 
 def preset_to_string(preset: str) -> str:
     normalized = preset.strip().lower()
-    if normalized in {*BUILT_IN_PRESETS, PRESET_CUSTOM, PRESET_USER}:
+    if normalized in {*BUILT_IN_PRESETS, PRESET_CUSTOM, PRESET_USER, PRESET_BT2446_A, PRESET_BT2446_B}:
         return normalized
     return PRESET_CUSTOM
 
@@ -786,6 +814,8 @@ def preset_display_name(preset: str) -> str:
         PRESET_VIVID_HIGHLIGHTS: "Vivid Highlights",
         PRESET_HIGH_CONTRAST: "High Contrast",
         PRESET_EXPONENTIAL: "Exponential",
+        PRESET_BT2446_A: "BT.2446 Method A",
+        PRESET_BT2446_B: "BT.2446 Method B",
         PRESET_USER: "User Preset",
         PRESET_CUSTOM: "Custom",
     }
@@ -807,6 +837,25 @@ def _exponential_mapping(t: float) -> float:
     return (math.exp(k * t) - 1.0) / denom
 
 
+def _bt2446_method_a(input_nits: float, reference_nits: float, peak_nits: float) -> float:
+    import math
+
+    ref = max(reference_nits, 1e-3)
+    peak = max(peak_nits, ref)
+    y = max(0.0, min(1.0, input_nits / ref))
+    return ref + (peak - ref) * (y ** (1.0 / 1.2))
+
+
+def _bt2446_method_b(input_nits: float, reference_nits: float, peak_nits: float) -> float:
+    import math
+
+    ref = max(reference_nits, 1e-3)
+    peak = max(peak_nits, ref)
+    y = max(0.0, min(1.0, input_nits / ref))
+    shoulder = 1.0 - math.exp(-3.5 * y)
+    return ref + (peak - ref) * (shoulder ** (1.0 / 1.45))
+
+
 def generate_preset_intermediate_points(
     preset: str, reference_nits: float, peak_nits: float
 ) -> list[tuple[float, float]]:
@@ -823,6 +872,14 @@ def generate_preset_intermediate_points(
 
     if preset == PRESET_EXPONENTIAL:
         points = [(t * ref, _exponential_mapping(t) * peak) for t in PRESET_SAMPLE_FRACTIONS]
+        return sanitize_intermediate_points(points, ref, peak, ref)
+
+    if preset == PRESET_BT2446_A:
+        points = [(t * ref, _bt2446_method_a(t * ref, ref, peak)) for t in PRESET_SAMPLE_FRACTIONS]
+        return sanitize_intermediate_points(points, ref, peak, ref)
+
+    if preset == PRESET_BT2446_B:
+        points = [(t * ref, _bt2446_method_b(t * ref, ref, peak)) for t in PRESET_SAMPLE_FRACTIONS]
         return sanitize_intermediate_points(points, ref, peak, ref)
 
     return []
@@ -1084,6 +1141,12 @@ def settings_from_curve(
     updated["GamutExpansion"] = clamp_gamut_expansion(
         float(curve_values.get("GamutExpansion", updated.get("GamutExpansion", 1.5)))
     )
+    updated["HighlightRolloff"] = clamp_highlight_rolloff(
+        float(curve_values.get("HighlightRolloff", updated.get("HighlightRolloff", 0.5)))
+    )
+    updated["ChromaCompensation"] = clamp_chroma_compensation(
+        float(curve_values.get("ChromaCompensation", updated.get("ChromaCompensation", 0.7)))
+    )
     return sanitize_settings(updated, reference, max_nits)
 
 
@@ -1199,6 +1262,9 @@ def run_qt_form(
             self.tone_curve_user_preset_id = str(initial_settings.get("ToneCurveUserPresetId", "")).strip()
             self.vibrance_value = float(initial_settings.get("Vibrance", 0.0))
             self.gamut_value = float(initial_settings.get("GamutExpansion", 1.5))
+            self.highlight_rolloff_value = float(initial_settings.get("HighlightRolloff", 0.5))
+            self.chroma_compensation_value = float(initial_settings.get("ChromaCompensation", 0.35))
+            self.show_reference_overlay = False
             self.black_point_value = clamp_black(float(initial_settings.get("BlackPoint", 0.0)))
             self._cfg_path = config_path()
 
@@ -1251,6 +1317,15 @@ def run_qt_form(
                 "Boosts automatic saturation-aware gamut expansion. "
                 "0 applies a reduced baseline; 1.5 matches the previous default strength."
             )
+            self.highlight_rolloff_spin = QDoubleSpinBox(self)
+            self.highlight_rolloff_spin.setRange(0.0, 1.0)
+            self.highlight_rolloff_spin.setSingleStep(0.05)
+            self.chroma_compensation_spin = QDoubleSpinBox(self)
+            self.chroma_compensation_spin.setRange(0.0, 1.0)
+            self.chroma_compensation_spin.setSingleStep(0.05)
+            self.analyze_btn = QPushButton("Suggest peak…", self)
+            self.reference_overlay_btn = QPushButton("Toggle reference guide", self)
+            self.reference_overlay_btn.setCheckable(True)
             self.input_label = QLabel("Input: —", self)
             self.output_label = QLabel("Output: —", self)
             controls.addRow("Peak nits:", self.peak_spin)
@@ -1258,6 +1333,10 @@ def run_qt_form(
             controls.addRow("Shadow offset:", self.black_point_spin)
             controls.addRow("Vibrance:", self.vibrance_spin)
             controls.addRow("Gamut expansion boost:", self.gamut_spin)
+            controls.addRow("Highlight rolloff:", self.highlight_rolloff_spin)
+            controls.addRow("Chroma compensation:", self.chroma_compensation_spin)
+            controls.addRow(self.analyze_btn)
+            controls.addRow(self.reference_overlay_btn)
             controls.addRow(self.input_label)
             controls.addRow(self.output_label)
             body.addLayout(controls, 1)
@@ -1276,6 +1355,12 @@ def run_qt_form(
             self.vibrance_spin.editingFinished.connect(self._emit_committed)
             self.gamut_spin.valueChanged.connect(self._on_gamut_changed)
             self.gamut_spin.editingFinished.connect(self._emit_committed)
+            self.highlight_rolloff_spin.valueChanged.connect(self._on_highlight_rolloff_changed)
+            self.highlight_rolloff_spin.editingFinished.connect(self._emit_committed)
+            self.chroma_compensation_spin.valueChanged.connect(self._on_chroma_compensation_changed)
+            self.chroma_compensation_spin.editingFinished.connect(self._emit_committed)
+            self.analyze_btn.clicked.connect(self._suggest_peak)
+            self.reference_overlay_btn.toggled.connect(self._toggle_reference_overlay)
             self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
             self.preset_combo.activated.connect(self._emit_committed)
             self.save_preset_btn.clicked.connect(self._save_user_preset)
@@ -1477,6 +1562,8 @@ def run_qt_form(
             self.black_point_spin.setValue(self.black_point_value)
             self.vibrance_spin.setValue(self.vibrance_value)
             self.gamut_spin.setValue(self.gamut_value)
+            self.highlight_rolloff_spin.setValue(self.highlight_rolloff_value)
+            self.chroma_compensation_spin.setValue(self.chroma_compensation_value)
             self._enforce_peak_floor()
             self._sanitize_curve_points()
             self._block = False
@@ -1491,6 +1578,32 @@ def run_qt_form(
             self.black_point_value = clamp_black(float(self.black_point_spin.value()))
             self.vibrance_value = clamp_vibrance(float(self.vibrance_spin.value()))
             self.gamut_value = clamp_gamut_expansion(float(self.gamut_spin.value()))
+            self.highlight_rolloff_value = clamp_highlight_rolloff(float(self.highlight_rolloff_spin.value()))
+            self.chroma_compensation_value = clamp_chroma_compensation(float(self.chroma_compensation_spin.value()))
+
+        def _suggest_peak(self) -> None:
+            suggested = min(self.max_nits_limit, max(self._peak_min(), int(round(self.reference_nits * 4.5))))
+            self._block = True
+            self.peak_spin.setValue(suggested)
+            self._block = False
+            self._on_peak_spin_changed()
+            self._emit_committed()
+
+        def _toggle_reference_overlay(self, enabled: bool) -> None:
+            self.show_reference_overlay = enabled
+            self.update()
+
+        def _on_highlight_rolloff_changed(self) -> None:
+            if self._block:
+                return
+            self.highlight_rolloff_value = clamp_highlight_rolloff(float(self.highlight_rolloff_spin.value()))
+            self.update()
+
+        def _on_chroma_compensation_changed(self) -> None:
+            if self._block:
+                return
+            self.chroma_compensation_value = clamp_chroma_compensation(float(self.chroma_compensation_spin.value()))
+            self.update()
 
         def _plot_host_rect(self) -> QRectF:
             top_left = self.plot_host.mapTo(self, QPoint(0, 0))
@@ -1547,6 +1660,27 @@ def run_qt_form(
             if reference < self.peak_nits:
                 painter.setPen(QPen(QColor(90, 140, 200, 140), 1, Qt.PenStyle.DashLine))
                 painter.drawLine(self._nits_to_pixel(0.0, reference), self._nits_to_pixel(reference, reference))
+
+            if not self.show_reference_overlay:
+                return
+
+            ref_points = generate_preset_intermediate_points(PRESET_BT2446_A, self.reference_nits, self.peak_nits)
+            if len(ref_points) < 2:
+                return
+            curve = build_full_curve((self.reference_nits, self.peak_nits), self.reference_nits, self.peak_nits, ref_points)
+            path = QPainterPath()
+            start_x = curve[0][0]
+            end_x = curve[-1][0]
+            for sample in range(129):
+                input_nits = start_x + (end_x - start_x) * (sample / 128.0)
+                output = evaluate_tone_curve(curve, input_nits)
+                pixel = self._nits_to_pixel(input_nits, output)
+                if sample == 0:
+                    path.moveTo(pixel)
+                else:
+                    path.lineTo(pixel)
+            painter.setPen(QPen(QColor(120, 180, 255, 180), 1, Qt.PenStyle.DashLine))
+            painter.drawPath(path)
 
         def _update_readout(self, input_nits: float) -> None:
             output = evaluate_tone_curve(self._full_curve(), input_nits)
@@ -1627,6 +1761,8 @@ def run_qt_form(
                 "BlackPoint": float(self.black_point_value),
                 "Vibrance": float(self.vibrance_value),
                 "GamutExpansion": float(self.gamut_value),
+                "HighlightRolloff": float(self.highlight_rolloff_value),
+                "ChromaCompensation": float(self.chroma_compensation_value),
             }
 
         def paintEvent(self, _event) -> None:  # noqa: ANN001, N802
@@ -1877,6 +2013,8 @@ def run_qt_form(
             self.tone_curve.black_point_spin.interpretText()
             self.tone_curve.vibrance_spin.interpretText()
             self.tone_curve.gamut_spin.interpretText()
+            self.tone_curve.highlight_rolloff_spin.interpretText()
+            self.tone_curve.chroma_compensation_spin.interpretText()
             if not self.on_commit_curve(self.tone_curve.current_values()):
                 return
             self.accept()
@@ -1985,8 +2123,8 @@ def verify_tone_curve_invariants() -> None:
     at_mid = evaluate_tone_curve(curve, 151.0)
     assert abs(at_mid - 243.0) < 2.0, f"curve must pass through (151, 243), got {at_mid}"
 
-    lut = build_tone_curve_lut(curve, ref)
-    assert len(lut) == 256
+    lut = build_tone_curve_lut(curve, ref, TONE_CURVE_LUT_SIZE, ref)
+    assert len(lut) == TONE_CURVE_LUT_SIZE
     assert abs(lut[62] - evaluate_tone_curve(curve, 50.0)) < 2.0
 
     assert preset_from_string("linear") == PRESET_LINEAR
