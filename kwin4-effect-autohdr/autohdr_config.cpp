@@ -28,6 +28,16 @@ float clampGamutExpansion(float value)
     return qBound(0.0f, value, 20.0f);
 }
 
+float clampCurveAntialiasStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
+float clampHighlightSoftness(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
 namespace {
 
 QPointF migrateSdrMaxPoint(const KConfigGroup &group, float peakNits)
@@ -145,6 +155,9 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     GeneralSettings general;
     const KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     general.autoActivateCalibrated = group.readEntry("AutoActivateCalibrated", true);
+    general.curveAntialiasStrength =
+        clampCurveAntialiasStrength(group.readEntry("CurveAntialiasStrength", 0.35f));
+    general.highlightSoftness = clampHighlightSoftness(group.readEntry("HighlightSoftness", 0.25f));
     return general;
 }
 
@@ -152,6 +165,8 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
 {
     KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     group.writeEntry("AutoActivateCalibrated", general.autoActivateCalibrated);
+    group.writeEntry("CurveAntialiasStrength", general.curveAntialiasStrength);
+    group.writeEntry("HighlightSoftness", general.highlightSoftness);
     config->sync();
 }
 

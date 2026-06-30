@@ -95,6 +95,21 @@ namespace KWin {
             m_processingQuality = 0;
         }
 
+        if (qEnvironmentVariableIsSet("AUTOHDR_CURVE_AA")) {
+            bool ok = false;
+            const float value = qEnvironmentVariable("AUTOHDR_CURVE_AA").toFloat(&ok);
+            if (ok) {
+                m_curveAntialiasStrength = AutoHdr::clampCurveAntialiasStrength(value);
+            }
+        }
+        if (qEnvironmentVariableIsSet("AUTOHDR_HIGHLIGHT_SOFTNESS")) {
+            bool ok = false;
+            const float value = qEnvironmentVariable("AUTOHDR_HIGHLIGHT_SOFTNESS").toFloat(&ok);
+            if (ok) {
+                m_highlightSoftness = AutoHdr::clampHighlightSoftness(value);
+            }
+        }
+
         m_config = AutoHdr::openConfig();
         loadGlobalDefaults();
 
@@ -381,7 +396,14 @@ namespace KWin {
         reloadHdrDisplayLimits();
 
         m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits);
-        m_autoActivateCalibrated = AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated;
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivateCalibrated = general.autoActivateCalibrated;
+        if (!qEnvironmentVariableIsSet("AUTOHDR_CURVE_AA")) {
+            m_curveAntialiasStrength = general.curveAntialiasStrength;
+        }
+        if (!qEnvironmentVariableIsSet("AUTOHDR_HIGHLIGHT_SOFTNESS")) {
+            m_highlightSoftness = general.highlightSoftness;
+        }
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
     }
@@ -432,6 +454,8 @@ namespace KWin {
         const float inputSpan = qMax(endpoints.visualReferenceNits, 1.0f);
         m_cachedToneCurveInputSpan = inputSpan;
         AutoHdr::buildToneCurveLut(fullCurve, inputSpan, m_toneCurveLut, AutoHdr::kToneCurveLutSize);
+        AutoHdr::buildToneCurveSlopeLut(m_toneCurveLut, m_toneCurveSlopeLut, AutoHdr::kToneCurveLutSize,
+                                        &m_toneCurveMaxSlope);
         m_toneCurveLutDirty = true;
     }
 
@@ -446,6 +470,12 @@ namespace KWin {
         ShaderBinder binder(m_shader.get());
         if (m_locToneCurveLut >= 0) {
             glUniform1fv(m_locToneCurveLut, AutoHdr::kToneCurveLutSize, m_toneCurveLut);
+        }
+        if (m_locToneCurveSlopeLut >= 0) {
+            glUniform1fv(m_locToneCurveSlopeLut, AutoHdr::kToneCurveLutSize, m_toneCurveSlopeLut);
+        }
+        if (m_locToneCurveMaxSlope >= 0) {
+            m_shader->setUniform(m_locToneCurveMaxSlope, qMax(m_toneCurveMaxSlope, 1e-6f));
         }
         if (m_locToneCurveInputSpan >= 0) {
             m_shader->setUniform(m_locToneCurveInputSpan, m_cachedToneCurveInputSpan);
@@ -467,6 +497,10 @@ namespace KWin {
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
+        m_locCurveAntialiasStrength = m_shader->uniformLocation("curveAntialiasStrength");
+        m_locHighlightSoftness = m_shader->uniformLocation("highlightSoftness");
+        m_locToneCurveSlopeLut = m_shader->uniformLocation("toneCurveSlopeLut");
+        m_locToneCurveMaxSlope = m_shader->uniformLocation("toneCurveMaxSlope");
         m_locProcessingQuality = m_shader->uniformLocation("processingQuality");
         m_locEnableSpatialAvgPreCurve = m_shader->uniformLocation("enableSpatialAvgPreCurve");
         warnMissingToneCurveUniformsOnce();
@@ -498,6 +532,12 @@ namespace KWin {
         }
         if (m_locDitherStrength >= 0) {
             m_shader->setUniform(m_locDitherStrength, m_ditherStrength);
+        }
+        if (m_locCurveAntialiasStrength >= 0) {
+            m_shader->setUniform(m_locCurveAntialiasStrength, m_curveAntialiasStrength);
+        }
+        if (m_locHighlightSoftness >= 0) {
+            m_shader->setUniform(m_locHighlightSoftness, m_highlightSoftness);
         }
         if (m_locProcessingQuality >= 0) {
             m_shader->setUniform(m_locProcessingQuality, m_processingQuality);

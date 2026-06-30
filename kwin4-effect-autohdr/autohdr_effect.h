@@ -133,10 +133,16 @@ namespace KWin {
         int m_locToneCurveLut = -1;
         int m_locDebandStrength = -1;
         int m_locDitherStrength = -1;
+        int m_locCurveAntialiasStrength = -1;
+        int m_locHighlightSoftness = -1;
+        int m_locToneCurveSlopeLut = -1;
+        int m_locToneCurveMaxSlope = -1;
         int m_locProcessingQuality = -1;
         int m_locEnableSpatialAvgPreCurve = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
+        float m_toneCurveSlopeLut[AutoHdr::kToneCurveLutSize] = {};
+        float m_toneCurveMaxSlope = 1.0f;
         bool m_toneCurveLutDirty = true;
         float m_cachedToneCurveInputSpan = 203.0f;
         bool m_warnedMissingToneCurveUniforms = false;
@@ -145,6 +151,8 @@ namespace KWin {
         int m_processingQuality = 1;
         float m_debandStrength = 0.25f;
         float m_ditherStrength = 0.05f / 255.0f;
+        float m_curveAntialiasStrength = 0.35f;
+        float m_highlightSoftness = 0.25f;
 
         QString m_shaderPath;
         QDateTime m_shaderFragMtime;
