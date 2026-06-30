@@ -121,7 +121,7 @@ float ign(vec2 p)
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits)
+vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits, float localGrad)
 {
     if (strength <= 0.0) {
         return rgbNits;
@@ -130,9 +130,56 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits)
     float ref = max(refNits, 1.0);
     vec3 rel = rgbNits / ref;
     float outLuma = dot(rel, AUTOHDR_LUMA);
-    float shadowW = 1.0 - smoothstep(0.0, 0.05, outLuma);
-    float highlightW = smoothstep(0.4, 1.0, outLuma);
-    float amp = strength * mix(0.15, 1.0, highlightW) * mix(1.0, 0.1, shadowW);
+    float shadowW = 1.0 - smoothstep(0.0, 0.08, outLuma);
+    float edgeW = 1.0 - smoothstep(0.002, 0.015, localGrad);
+    float amp = strength * shadowW * edgeW;
+    if (amp <= 0.0) {
+        return rgbNits;
+    }
     rel += (ign(px) - 0.5) * amp;
     return rel * ref;
+}
+
+vec3 debandPostCurveLuma(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 neighbor2, vec3 neighbor3,
+                         float strength, float refNits)
+{
+    if (strength <= 0.0) {
+        return centerNits;
+    }
+
+    float ref = max(refNits, 1.0);
+    float centerLuma = dot(centerNits / ref, AUTOHDR_LUMA);
+    if (centerLuma < 1e-6) {
+        return centerNits;
+    }
+
+    float targetLuma = centerLuma;
+    float weight = 1.0;
+
+    float neighborLuma = dot(neighbor0 / ref, AUTOHDR_LUMA);
+    float band = isBandStep(neighborLuma - centerLuma);
+    float blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
+    targetLuma += blended * band * strength;
+    weight += band * strength;
+
+    neighborLuma = dot(neighbor1 / ref, AUTOHDR_LUMA);
+    band = isBandStep(neighborLuma - centerLuma);
+    blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
+    targetLuma += blended * band * strength;
+    weight += band * strength;
+
+    neighborLuma = dot(neighbor2 / ref, AUTOHDR_LUMA);
+    band = isBandStep(neighborLuma - centerLuma);
+    blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
+    targetLuma += blended * band * strength;
+    weight += band * strength;
+
+    neighborLuma = dot(neighbor3 / ref, AUTOHDR_LUMA);
+    band = isBandStep(neighborLuma - centerLuma);
+    blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
+    targetLuma += blended * band * strength;
+    weight += band * strength;
+
+    targetLuma = min(targetLuma / weight, centerLuma);
+    return centerNits * (targetLuma / centerLuma);
 }

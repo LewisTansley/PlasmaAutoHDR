@@ -86,37 +86,24 @@ vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, 
     return accum / count;
 }
 
-void main()
+vec3 decodeRgbNits(vec4 tex, float ref, float sourceWhite)
 {
-    vec4 tex = texture(sampler, texcoord0);
-
-    tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
+    tex = encodingToNits(tex, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                         sourceTransferFunctionParams.y);
     tex.rgb = (colorimetryTransform * vec4(tex.rgb, 1.0)).rgb;
-
-    float ref = max(destinationReferenceLuminance, 1.0);
-    float displayPeak = max(maxDestinationLuminance, ref);
-
-    float sourceWhite = max(sourceTransferFunctionParams.x + sourceTransferFunctionParams.y, 1.0);
     tex.rgb *= ref / sourceWhite;
-
     float alpha = max(tex.a, 0.001);
-    vec3 rgb = tex.rgb / alpha;
+    return tex.rgb / alpha;
+}
 
-    float deband = processingQuality > 0 ? debandStrength : 0.0;
-    if (deband > 0.0 && textureWidth > 0 && textureHeight > 0) {
-        ivec2 texSize = ivec2(textureWidth, textureHeight);
-        vec3 centerRel = rgb / ref;
-        centerRel = debandSdrRel(sampler, texcoord0, centerRel, deband, texSize, ref, sourceWhite);
-        rgb = centerRel * ref;
-    }
-
+vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan)
+{
     rgb = reconstructHighlights(rgb, ref);
 
     float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;
     t = applyUserBlackPoint(t, blackPoint);
 
-    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
     float inputNits = t * ref;
     float outputNits = mapToneCurve(inputNits, curveSpan);
     rgb *= outputNits / max(inputNits, 1e-6);
@@ -133,8 +120,73 @@ void main()
         rgb *= displayPeak / outLuma;
     }
 
-    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref);
+    return rgb;
+}
 
+vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float displayPeak, float sourceWhite, float curveSpan)
+{
+    return toneMapPipeline(decodeRgbNits(texture(tex, uv), ref, sourceWhite), ref, displayPeak, curveSpan);
+}
+
+void main()
+{
+    vec4 tex = texture(sampler, texcoord0);
+
+    float ref = max(destinationReferenceLuminance, 1.0);
+    float displayPeak = max(maxDestinationLuminance, ref);
+    float sourceWhite = max(sourceTransferFunctionParams.x + sourceTransferFunctionParams.y, 1.0);
+    float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
+
+    vec3 rgb = decodeRgbNits(tex, ref, sourceWhite);
+
+    float deband = processingQuality > 0 ? debandStrength : 0.0;
+    if (deband > 0.0 && textureWidth > 0 && textureHeight > 0) {
+        ivec2 texSize = ivec2(textureWidth, textureHeight);
+        vec3 centerRel = rgb / ref;
+        centerRel = debandSdrRel(sampler, texcoord0, centerRel, deband, texSize, ref, sourceWhite);
+        rgb = centerRel * ref;
+    }
+
+    rgb = toneMapPipeline(rgb, ref, displayPeak, curveSpan);
+
+    float localGrad = 0.0;
+    vec3 neighbor0 = rgb;
+    vec3 neighbor1 = rgb;
+    vec3 neighbor2 = rgb;
+    vec3 neighbor3 = rgb;
+    if ((deband > 0.0 || ditherStrength > 0.0) && textureWidth > 0 && textureHeight > 0) {
+        ivec2 texSize = ivec2(textureWidth, textureHeight);
+        ivec2 px = ivec2(clamp(texcoord0 * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+
+        float centerLuma = dot(rgb / ref, AUTOHDR_LUMA);
+        float gradAccum = 0.0;
+
+        ivec2 npx0 = clamp(px + ivec2(1, 0), ivec2(0), texSize - ivec2(1));
+        neighbor0 = sampleToneMappedNits(sampler, (vec2(npx0) + 0.5) / vec2(texSize), ref, displayPeak, sourceWhite, curveSpan);
+        gradAccum += abs(dot(neighbor0 / ref, AUTOHDR_LUMA) - centerLuma);
+
+        ivec2 npx1 = clamp(px + ivec2(-1, 0), ivec2(0), texSize - ivec2(1));
+        neighbor1 = sampleToneMappedNits(sampler, (vec2(npx1) + 0.5) / vec2(texSize), ref, displayPeak, sourceWhite, curveSpan);
+        gradAccum += abs(dot(neighbor1 / ref, AUTOHDR_LUMA) - centerLuma);
+
+        ivec2 npx2 = clamp(px + ivec2(0, 1), ivec2(0), texSize - ivec2(1));
+        neighbor2 = sampleToneMappedNits(sampler, (vec2(npx2) + 0.5) / vec2(texSize), ref, displayPeak, sourceWhite, curveSpan);
+        gradAccum += abs(dot(neighbor2 / ref, AUTOHDR_LUMA) - centerLuma);
+
+        ivec2 npx3 = clamp(px + ivec2(0, -1), ivec2(0), texSize - ivec2(1));
+        neighbor3 = sampleToneMappedNits(sampler, (vec2(npx3) + 0.5) / vec2(texSize), ref, displayPeak, sourceWhite, curveSpan);
+        gradAccum += abs(dot(neighbor3 / ref, AUTOHDR_LUMA) - centerLuma);
+
+        localGrad = gradAccum * 0.25;
+    }
+
+    if (deband > 0.0) {
+        rgb = debandPostCurveLuma(rgb, neighbor0, neighbor1, neighbor2, neighbor3, deband, ref);
+    }
+
+    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad);
+
+    float alpha = max(tex.a, 0.001);
     tex.rgb = max(rgb * alpha, vec3(0.0));
     tex *= modulation;
     fragColor = nitsToDestinationEncoding(tex);
