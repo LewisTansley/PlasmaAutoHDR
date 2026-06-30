@@ -114,13 +114,12 @@ void main()
 
     float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
     float t = lumaNits / ref;
-    t = adaptiveShadowRolloff(t);
     t = applyUserBlackPoint(t, blackPoint);
 
     float curveSpan = toneCurveInputSpan > 1.0 ? toneCurveInputSpan : ref;
-    float correctedNits = t * ref;
-    float Yn = mapToneCurve(correctedNits, curveSpan);
-    rgb = applyICtCpToneCurve(rgb, Yn, lumaNits, ref);
+    float inputNits = t * ref;
+    float outputNits = mapToneCurve(inputNits, curveSpan);
+    rgb *= outputNits / max(inputNits, 1e-6);
 
     if (gamutExpansion > 0.0) {
         rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;

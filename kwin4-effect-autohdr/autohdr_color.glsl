@@ -1,53 +1,10 @@
-// AutoHDR perceptual color processing helpers (included into autohdr.frag)
+// AutoHDR color processing helpers (included into autohdr.frag)
 
 const vec3 AUTOHDR_LUMA = vec3(0.2126, 0.7152, 0.0722);
-
-// ICtCp conversions use KWin colormanagement.glsl uniforms (destinationToLMS, lmsToDestination)
-// and constants (toICtCp, fromICtCp, linearToPq, pqToLinear) — same path as doTonemapping().
-
-vec3 linearToICtCp(vec3 rgbNits)
-{
-    vec3 lms = (destinationToLMS * vec4(rgbNits, 1.0)).rgb;
-    vec3 lmsPQ = linearToPq(lms / 10000.0);
-    return toICtCp * lmsPQ;
-}
-
-vec3 iCtCpToLinear(vec3 ictcp)
-{
-    return (lmsToDestination * vec4(pqToLinear(fromICtCp * ictcp), 1.0)).rgb * 10000.0;
-}
-
-float adaptiveShadowRolloff(float t)
-{
-    const float toeEnd = 5.0 / 255.0;
-    float u = clamp(t / toeEnd, 0.0, 1.0);
-    float toe = toeEnd * u * u * (3.0 - 2.0 * u);
-    return mix(toe, t, step(toeEnd + 1e-6, t));
-}
 
 float applyUserBlackPoint(float t, float offset)
 {
     return max(t - offset, 0.0) / max(1.0 - offset, 1e-6);
-}
-
-vec3 applyICtCpToneCurve(vec3 rgbNits, float targetLumaNits, float sourceLumaNits, float refNits)
-{
-    if (abs(targetLumaNits - sourceLumaNits) < 1e-4) {
-        return rgbNits;
-    }
-
-    vec3 ictcp = linearToICtCp(rgbNits);
-    float IgrayIn = linearToICtCp(vec3(sourceLumaNits)).x;
-    float IgrayOut = linearToICtCp(vec3(targetLumaNits)).x;
-    ictcp.x += (IgrayOut - IgrayIn);
-
-    vec3 result = max(iCtCpToLinear(ictcp), vec3(0.0));
-    float peak = max(max(result.r, result.g), result.b);
-    float maxAllowed = max(targetLumaNits * 2.0, sourceLumaNits);
-    if (peak > maxAllowed) {
-        result *= maxAllowed / peak;
-    }
-    return result;
 }
 
 vec3 reconstructHighlights(vec3 rgbNits, float refNits)

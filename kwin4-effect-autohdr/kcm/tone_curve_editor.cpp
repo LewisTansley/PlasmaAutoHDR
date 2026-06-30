@@ -79,7 +79,7 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     m_blackPoint->setRange(-0.01, 0.01);
     m_blackPoint->setDecimals(4);
     m_blackPoint->setSingleStep(0.0001);
-    m_blackPoint->setToolTip(tr("Fine-tune shadow lift on top of automatic 8-bit shadow roll-off. "
+    m_blackPoint->setToolTip(tr("Fine-tune shadow black point. "
                                  "Leave at 0 for most content."));
     m_vibrance = new QDoubleSpinBox(this);
     m_vibrance->setRange(0.0, 10.0);
