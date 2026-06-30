@@ -91,6 +91,10 @@ namespace KWin {
 
     AutoHDREffect::AutoHDREffect()
     {
+        if (qEnvironmentVariableIntValue("AUTOHDR_SPATIAL_AVG") == 0) {
+            m_processingQuality = 0;
+        }
+
         m_config = AutoHdr::openConfig();
         loadGlobalDefaults();
 
@@ -464,6 +468,7 @@ namespace KWin {
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
         m_locProcessingQuality = m_shader->uniformLocation("processingQuality");
+        m_locEnableSpatialAvgPreCurve = m_shader->uniformLocation("enableSpatialAvgPreCurve");
         warnMissingToneCurveUniformsOnce();
     }
 
@@ -496,6 +501,10 @@ namespace KWin {
         }
         if (m_locProcessingQuality >= 0) {
             m_shader->setUniform(m_locProcessingQuality, m_processingQuality);
+        }
+        if (m_locEnableSpatialAvgPreCurve >= 0) {
+            const int enablePreCurve = redirectInternalFormat() == GL_RGBA8 ? 1 : 0;
+            m_shader->setUniform(m_locEnableSpatialAvgPreCurve, enablePreCurve);
         }
 
         uploadToneCurveUniforms();

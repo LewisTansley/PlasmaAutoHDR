@@ -101,19 +101,23 @@ vec3 expandGamutSmart(vec3 vHDRColor, float userBoost)
     return AP1_2_sRGB * ColorAP1;
 }
 
-float isBandStep(float delta)
+float quantFlatness(float delta)
 {
     const float s = 1.0 / 255.0;
     float d = abs(delta);
-    return step(s - 2.0e-4, d) * (1.0 - step(s + 2.0e-4, d));
+    return 1.0 - smoothstep(s + 1.0e-4, s * 2.0, d);
 }
 
-vec3 debandNeighbors(vec3 centerRel, vec3 neighborRel, float strength)
+float regionWeight(float lumaRel)
 {
-    float band = isBandStep(neighborRel.r - centerRel.r)
-               * isBandStep(neighborRel.g - centerRel.g)
-               * isBandStep(neighborRel.b - centerRel.b);
-    return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
+    float shadowW = 1.0 - smoothstep(0.0, 0.12, lumaRel);
+    float highlightW = smoothstep(0.85, 0.98, lumaRel);
+    return max(shadowW, highlightW);
+}
+
+float edgeFlatness(float localGrad)
+{
+    return 1.0 - smoothstep(0.002, 0.015, localGrad);
 }
 
 float ign(vec2 p)
@@ -121,7 +125,8 @@ float ign(vec2 p)
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits, float localGrad)
+vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits, float localGrad,
+                           float spatialAvgStrength)
 {
     if (strength <= 0.0) {
         return rgbNits;
@@ -131,8 +136,11 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits,
     vec3 rel = rgbNits / ref;
     float outLuma = dot(rel, AUTOHDR_LUMA);
     float shadowW = 1.0 - smoothstep(0.0, 0.08, outLuma);
-    float edgeW = 1.0 - smoothstep(0.002, 0.015, localGrad);
+    float edgeW = edgeFlatness(localGrad);
     float amp = strength * shadowW * edgeW;
+    if (spatialAvgStrength > 0.0) {
+        amp *= 1.0 - shadowW * 0.5;
+    }
     if (amp <= 0.0) {
         return rgbNits;
     }
@@ -140,8 +148,8 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits,
     return rel * ref;
 }
 
-vec3 debandPostCurveLuma(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 neighbor2, vec3 neighbor3,
-                         float strength, float refNits)
+vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 neighbor2, vec3 neighbor3,
+                         float strength, float refNits, float localGrad)
 {
     if (strength <= 0.0) {
         return centerNits;
@@ -153,32 +161,34 @@ vec3 debandPostCurveLuma(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 n
         return centerNits;
     }
 
+    float regionW = regionWeight(centerLuma);
+    float edgeW = edgeFlatness(localGrad);
     float targetLuma = centerLuma;
     float weight = 1.0;
 
     float neighborLuma = dot(neighbor0 / ref, AUTOHDR_LUMA);
-    float band = isBandStep(neighborLuma - centerLuma);
+    float w = quantFlatness(neighborLuma - centerLuma) * regionW * edgeW * strength;
     float blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
-    targetLuma += blended * band * strength;
-    weight += band * strength;
+    targetLuma += blended * w;
+    weight += w;
 
     neighborLuma = dot(neighbor1 / ref, AUTOHDR_LUMA);
-    band = isBandStep(neighborLuma - centerLuma);
+    w = quantFlatness(neighborLuma - centerLuma) * regionW * edgeW * strength;
     blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
-    targetLuma += blended * band * strength;
-    weight += band * strength;
+    targetLuma += blended * w;
+    weight += w;
 
     neighborLuma = dot(neighbor2 / ref, AUTOHDR_LUMA);
-    band = isBandStep(neighborLuma - centerLuma);
+    w = quantFlatness(neighborLuma - centerLuma) * regionW * edgeW * strength;
     blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
-    targetLuma += blended * band * strength;
-    weight += band * strength;
+    targetLuma += blended * w;
+    weight += w;
 
     neighborLuma = dot(neighbor3 / ref, AUTOHDR_LUMA);
-    band = isBandStep(neighborLuma - centerLuma);
+    w = quantFlatness(neighborLuma - centerLuma) * regionW * edgeW * strength;
     blended = min((centerLuma + neighborLuma) * 0.5, centerLuma);
-    targetLuma += blended * band * strength;
-    weight += band * strength;
+    targetLuma += blended * w;
+    weight += w;
 
     targetLuma = min(targetLuma / weight, centerLuma);
     return centerNits * (targetLuma / centerLuma);

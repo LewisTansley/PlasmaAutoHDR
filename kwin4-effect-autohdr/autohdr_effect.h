@@ -134,6 +134,7 @@ namespace KWin {
         int m_locDebandStrength = -1;
         int m_locDitherStrength = -1;
         int m_locProcessingQuality = -1;
+        int m_locEnableSpatialAvgPreCurve = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
         bool m_toneCurveLutDirty = true;
@@ -141,7 +142,7 @@ namespace KWin {
         bool m_warnedMissingToneCurveUniforms = false;
 
         mutable GLenum m_redirectInternalFormat = 0;
-        int m_processingQuality = 0;
+        int m_processingQuality = 1;
         float m_debandStrength = 0.25f;
         float m_ditherStrength = 0.05f / 255.0f;
 

@@ -13,6 +13,7 @@ uniform float toneCurveLut[256];
 uniform float debandStrength;
 uniform float ditherStrength;
 uniform int processingQuality;
+uniform int enableSpatialAvgPreCurve;
 uniform int textureWidth;
 uniform int textureHeight;
 
@@ -57,12 +58,15 @@ vec3 sampleSdrRel(sampler2D tex, vec2 uv, float ref, float sourceWhite)
     return texSample.rgb / alpha / ref;
 }
 
-vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, ivec2 texSize, float ref,
-                  float sourceWhite)
+vec3 spatialAvgPreCurve(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, ivec2 texSize, float ref,
+                        float sourceWhite)
 {
     if (strength <= 0.0) {
         return centerRel;
     }
+
+    float centerLuma = dot(centerRel, AUTOHDR_LUMA);
+    float regionW = regionWeight(centerLuma);
 
     ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
     vec3 accum = centerRel;
@@ -76,11 +80,14 @@ vec3 debandSdrRel(sampler2D tex, vec2 texcoord, vec3 centerRel, float strength, 
         ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
         vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
         vec3 neighborRel = sampleSdrRel(tex, nuv, ref, sourceWhite);
-        float band = isBandStep(neighborRel.r - centerRel.r)
-                   * isBandStep(neighborRel.g - centerRel.g)
-                   * isBandStep(neighborRel.b - centerRel.b);
-        accum += mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
-        count += band * strength;
+        float inputGrad = abs(dot(neighborRel, AUTOHDR_LUMA) - centerLuma);
+        float flatW = 1.0 - smoothstep(0.001, 0.008, inputGrad);
+        float rgbFlat = quantFlatness(neighborRel.r - centerRel.r)
+                      * quantFlatness(neighborRel.g - centerRel.g)
+                      * quantFlatness(neighborRel.b - centerRel.b);
+        float w = rgbFlat * regionW * flatW * strength;
+        accum += mix(centerRel, (centerRel + neighborRel) * 0.5, w);
+        count += w;
     }
 
     return accum / count;
@@ -139,11 +146,11 @@ void main()
 
     vec3 rgb = decodeRgbNits(tex, ref, sourceWhite);
 
-    float deband = processingQuality > 0 ? debandStrength : 0.0;
-    if (deband > 0.0 && textureWidth > 0 && textureHeight > 0) {
+    float spatialAvg = processingQuality > 0 ? debandStrength : 0.0;
+    if (spatialAvg > 0.0 && enableSpatialAvgPreCurve > 0 && textureWidth > 0 && textureHeight > 0) {
         ivec2 texSize = ivec2(textureWidth, textureHeight);
         vec3 centerRel = rgb / ref;
-        centerRel = debandSdrRel(sampler, texcoord0, centerRel, deband, texSize, ref, sourceWhite);
+        centerRel = spatialAvgPreCurve(sampler, texcoord0, centerRel, spatialAvg, texSize, ref, sourceWhite);
         rgb = centerRel * ref;
     }
 
@@ -154,7 +161,7 @@ void main()
     vec3 neighbor1 = rgb;
     vec3 neighbor2 = rgb;
     vec3 neighbor3 = rgb;
-    if ((deband > 0.0 || ditherStrength > 0.0) && textureWidth > 0 && textureHeight > 0) {
+    if ((spatialAvg > 0.0 || ditherStrength > 0.0) && textureWidth > 0 && textureHeight > 0) {
         ivec2 texSize = ivec2(textureWidth, textureHeight);
         ivec2 px = ivec2(clamp(texcoord0 * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
 
@@ -180,11 +187,11 @@ void main()
         localGrad = gradAccum * 0.25;
     }
 
-    if (deband > 0.0) {
-        rgb = debandPostCurveLuma(rgb, neighbor0, neighbor1, neighbor2, neighbor3, deband, ref);
+    if (spatialAvg > 0.0) {
+        rgb = spatialAvgPostCurve(rgb, neighbor0, neighbor1, neighbor2, neighbor3, spatialAvg, ref, localGrad);
     }
 
-    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad);
+    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad, spatialAvg);
 
     float alpha = max(tex.a, 0.001);
     tex.rgb = max(rgb * alpha, vec3(0.0));
