@@ -57,7 +57,7 @@ struct AppProfile {
 struct GeneralSettings {
     bool autoActivateCalibrated = true;
     int processingQuality = 0;
-    float debandStrength = 0.25f;
+    float debandStrength = 0.0f;
     float ditherStrength = 0.15f / 255.0f;
     float postCurveDebandStrength = 0.0f;
     bool spatialHighlightRecovery = false;

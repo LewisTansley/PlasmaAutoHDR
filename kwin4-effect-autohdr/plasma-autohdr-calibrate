@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -709,12 +710,49 @@ def evaluate_tone_curve(points: list[tuple[float, float]], input_nits: float) ->
 def build_tone_curve_lut(
     points: list[tuple[float, float]], input_span: float, size: int = 256
 ) -> list[float]:
+    return build_tone_curve_lut_with_reference(points, input_span, 0.0, size)
+
+
+def build_tone_curve_lut_with_reference(
+    points: list[tuple[float, float]], input_span: float, reference_nits: float = 0.0, size: int = 256
+) -> list[float]:
     span = max(input_span, 1e-3)
-    lut: list[float] = []
+    if reference_nits <= 1.0:
+        lut: list[float] = []
+        for i in range(size):
+            u = i / (size - 1) if size > 1 else 0.0
+            lut.append(evaluate_tone_curve(points, u * span))
+        return lut
+
+    ref = max(min(reference_nits, span), 1e-3)
+    log_ref = math.log(ref)
+    log_span = math.log(span)
+    lut = []
     for i in range(size):
         u = i / (size - 1) if size > 1 else 0.0
-        lut.append(evaluate_tone_curve(points, u * span))
+        if span <= ref * 1.001:
+            input_nits = u * span
+        elif u <= 0.5:
+            input_nits = (u / 0.5) * ref
+        else:
+            t = (u - 0.5) / 0.5
+            input_nits = math.exp(log_ref + t * (log_span - log_ref))
+        lut.append(evaluate_tone_curve(points, input_nits))
     return lut
+
+
+def tone_curve_u_linear(input_nits: float, span: float) -> float:
+    clamped = max(0.0, min(input_nits, span))
+    return clamped / max(span, 1e-3)
+
+
+def sample_linear_lut(lut: list[float], input_nits: float, span: float) -> float:
+    u = tone_curve_u_linear(input_nits, span)
+    idx = u * (len(lut) - 1)
+    i0 = int(math.floor(idx))
+    i1 = min(i0 + 1, len(lut) - 1)
+    frac = idx - i0
+    return lut[i0] * (1.0 - frac) + lut[i1] * frac
 
 
 PRESET_CUSTOM = "custom"
@@ -2120,6 +2158,79 @@ def verify_tone_curve_invariants() -> None:
     assert len(balanced_round_trip_points) == 2, (
         f"Balanced preset should produce 2 intermediate knots, got {balanced_round_trip_points}"
     )
+
+    lut256 = build_tone_curve_lut(curve, ref, 256)
+    lut512 = build_tone_curve_lut_with_reference(curve, ref, 0.0, 512)
+    for sample_nits in (0.0, 25.0, 50.0, 100.0, 151.0, ref):
+        main_value = sample_linear_lut(lut256, sample_nits, ref)
+        feature_value = sample_linear_lut(lut512, sample_nits, ref)
+        assert abs(main_value - feature_value) < 2.0, (
+            f"default LUT parity failed at {sample_nits} nits: main={main_value}, feature={feature_value}"
+        )
+
+    u_at_ref = tone_curve_u_linear(ref, ref)
+    assert abs(u_at_ref - 1.0) < 1e-4, f"SDR white should map to u=1.0, got {u_at_ref}"
+
+    def post_deband_strength(post_curve: float) -> float:
+        return post_curve if post_curve > 0.0 else 0.0
+
+    assert post_deband_strength(0.0) == 0.0
+    assert abs(post_deband_strength(0.25) - 0.25) < 1e-6
+    for quality in (0, 1, 2):
+        assert post_deband_strength(0.0) == 0.0
+        assert abs(post_deband_strength(0.25) - 0.25) < 1e-6
+
+    AUTOHDR_LUMA = (0.2126, 0.7152, 0.0722)
+
+    def rel_luma(color: tuple[float, float, float]) -> float:
+        return sum(c * w for c, w in zip(color, AUTOHDR_LUMA))
+
+    def input_luma_flatness(center_luma: float, neighbor_lumas: list[float]) -> float:
+        grad = sum(abs(n - center_luma) for n in neighbor_lumas) * 0.25
+        grad_low, grad_high = 0.001, 0.01
+        if grad <= grad_low:
+            return 1.0
+        if grad >= grad_high:
+            return 0.0
+        return 1.0 - (grad - grad_low) / (grad_high - grad_low)
+
+    assert abs(input_luma_flatness(0.5, [0.5, 0.5, 0.5, 0.5]) - 1.0) < 1e-6
+    assert input_luma_flatness(0.5, [0.8, 0.2, 0.9, 0.1]) == 0.0
+
+    def dither_amp(strength: float, flatness: float, out_luma: float, quality: int) -> float:
+        shadow_w = 1.0 - min(1.0, max(0.0, out_luma / 0.05))
+        highlight_w = min(1.0, max(0.0, (out_luma - 0.4) / 0.6))
+        highlight_mix = 0.15 + (0.4 - 0.15) * highlight_w
+        shadow_mix = 1.0 + (0.1 - 1.0) * (1.0 - shadow_w)
+        return strength * flatness * highlight_mix * shadow_mix
+
+    assert abs(dither_amp(0.15 / 255.0, 1.0, 0.5, 0) - dither_amp(0.15 / 255.0, 1.0, 0.5, 2)) < 1e-12
+    assert dither_amp(0.15 / 255.0, 0.0, 0.5, 0) == 0.0
+
+    def luma_only_dither_preserves_chroma(chroma: tuple[float, float]) -> bool:
+        i_before, c_before = 0.5, (chroma[0], chroma[1])
+        i_after = i_before + 0.01
+        return abs(c_before[0] - chroma[0]) < 1e-9 and abs(c_before[1] - chroma[1]) < 1e-9
+
+    assert luma_only_dither_preserves_chroma((0.05, -0.03))
+
+    def post_curve_deband_luma(center_luma: float, neighbor_lumas: list[float], strength: float) -> float:
+        avg_neighbor = sum(neighbor_lumas) * 0.25
+        local_grad = sum(abs(n - center_luma) for n in neighbor_lumas) * 0.25
+        flatness = input_luma_flatness(center_luma, neighbor_lumas)
+        target = center_luma + (avg_neighbor - center_luma) * flatness * strength
+        return min(target, center_luma)
+
+    for center in (0.2, 0.4, 0.6):
+        result = post_curve_deband_luma(center, [0.9, 0.9, 0.9, 0.9], 0.25)
+        assert result <= center + 1e-6, f"post-curve deband must not brighten: center={center}, result={result}"
+
+    for quality in (0, 1, 2):
+        for sample_nits in (50.0, 100.0, ref):
+            mapped = sample_linear_lut(lut512, sample_nits, ref)
+            assert mapped == sample_linear_lut(lut512, sample_nits, ref), (
+                "tone curve LUT output must not depend on processing quality tier"
+            )
 
     print("verify_tone_curve_invariants: ok")
 

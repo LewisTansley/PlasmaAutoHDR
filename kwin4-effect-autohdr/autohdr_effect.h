@@ -142,19 +142,17 @@ namespace KWin {
         int m_locToneCurveReferenceNits = -1;
         int m_locMinDisplayNits = -1;
         int m_locToneCurveLut = -1;
-        int m_locDebandStrength = -1;
         int m_locDitherStrength = -1;
         int m_locProcessingQuality = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
         bool m_toneCurveLutDirty = true;
         float m_cachedToneCurveInputSpan = 203.0f;
-        float m_cachedToneCurveReferenceNits = 203.0f;
+        float m_cachedToneCurveReferenceNits = 0.0f;
         bool m_warnedMissingToneCurveUniforms = false;
 
         mutable GLenum m_redirectInternalFormat = 0;
         int m_processingQuality = 0;
-        float m_debandStrength = 0.25f;
         float m_ditherStrength = 0.15f / 255.0f;
         float m_postCurveDebandStrength = 0.0f;
         int m_captureUsesFloat = 0;

@@ -46,7 +46,7 @@ vec3 applyICtCpToneCurve(vec3 rgbNits, float targetLumaNits, float sourceLumaNit
 
     vec3 result = max(iCtCpToLinear(ictcp), vec3(0.0));
     float peak = max(max(result.r, result.g), result.b);
-    float maxAllowed = max(targetLumaNits * 2.0, sourceLumaNits);
+    float maxAllowed = max(targetLumaNits, sourceLumaNits);
     if (peak > maxAllowed) {
         result *= maxAllowed / peak;
     }
@@ -198,6 +198,14 @@ vec3 reconstructHighlightsSpatial(sampler2D tex, vec2 texcoord, vec3 rgbNits, fl
     vec3 avgHue = hueAccum / weight;
     float luma = dot(rel, AUTOHDR_LUMA);
     vec3 spatial = avgHue * luma;
+    float spatialPeak = max(max(spatial.r, spatial.g), spatial.b);
+    if (spatialPeak > peak) {
+        spatial *= peak / max(spatialPeak, 1e-6);
+    }
+    float spatialLuma = dot(spatial, AUTOHDR_LUMA);
+    if (peak > 0.95 && spatialLuma > luma) {
+        spatial *= luma / max(spatialLuma, 1e-6);
+    }
     float clipMask = smoothstep(0.95, 0.99, peak);
     return mix(base, spatial * refNits, clipMask * strength * 0.5);
 }
@@ -288,27 +296,53 @@ vec3 debandNeighbors(vec3 centerRel, vec3 neighborRel, float strength)
     return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength);
 }
 
-float isPostCurveBandStep(float delta, float refNits)
-{
-    float bandStep = max(refNits * 0.001, 1.0) / max(refNits, 1.0);
-    float d = abs(delta);
-    return step(bandStep * 0.5, d) * (1.0 - step(bandStep * 1.5, d));
-}
-
-vec3 debandPostCurve(vec3 centerRel, vec3 neighborRel, float strength, float refNits)
-{
-    float band = isPostCurveBandStep(neighborRel.r - centerRel.r, refNits)
-               * isPostCurveBandStep(neighborRel.g - centerRel.g, refNits)
-               * isPostCurveBandStep(neighborRel.b - centerRel.b, refNits);
-    return mix(centerRel, (centerRel + neighborRel) * 0.5, band * strength * 0.5);
-}
-
 float ign(vec2 p)
 {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits)
+float triangularIgn(vec2 p)
+{
+    return (ign(p) + ign(p + vec2(17.0, 89.0)) - 1.0) * 0.5;
+}
+
+float decodeInputRelLuma(sampler2D tex, vec2 uv, float ref, float sourceWhite)
+{
+    vec4 texSample = texture(tex, uv);
+    texSample = encodingToNits(texSample, sourceNamedTransferFunction, sourceTransferFunctionParams.x,
+                               sourceTransferFunctionParams.y);
+    texSample.rgb = (colorimetryTransform * vec4(texSample.rgb, 1.0)).rgb;
+    texSample.rgb *= ref / sourceWhite;
+    float alpha = max(texSample.a, 0.001);
+    return dot(texSample.rgb / alpha / ref, AUTOHDR_LUMA);
+}
+
+float inputLumaFlatness(sampler2D tex, vec2 texcoord, ivec2 texSize, float ref, float sourceWhite)
+{
+    if (texSize.x <= 0 || texSize.y <= 0) {
+        return 0.0;
+    }
+
+    ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
+    float centerLuma = decodeInputRelLuma(tex, texcoord, ref, sourceWhite);
+    float gradAccum = 0.0;
+
+    const ivec2 offsets[4] = ivec2[4](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)
+    );
+
+    for (int i = 0; i < 4; ++i) {
+        ivec2 npx = clamp(px + offsets[i], ivec2(0), texSize - ivec2(1));
+        vec2 nuv = (vec2(npx) + 0.5) / vec2(texSize);
+        gradAccum += abs(decodeInputRelLuma(tex, nuv, ref, sourceWhite) - centerLuma);
+    }
+
+    float localGrad = gradAccum * 0.25;
+    return 1.0 - smoothstep(0.001, 0.01, localGrad);
+}
+
+vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, sampler2D tex, vec2 texcoord, ivec2 texSize, float strength,
+                           float refNits, float sourceWhite)
 {
     if (strength <= 0.0) {
         return rgbNits;
@@ -319,7 +353,13 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits)
     float outLuma = dot(rel, AUTOHDR_LUMA);
     float shadowW = 1.0 - smoothstep(0.0, 0.05, outLuma);
     float highlightW = smoothstep(0.4, 1.0, outLuma);
-    float amp = strength * mix(0.15, 1.0, highlightW) * mix(1.0, 0.1, shadowW);
-    rel += (ign(px) - 0.5) * amp;
-    return rel * ref;
+    float flatness = inputLumaFlatness(tex, texcoord, texSize, ref, sourceWhite);
+    float amp = strength * flatness * mix(0.15, 0.4, highlightW) * mix(1.0, 0.1, shadowW);
+    if (amp <= 0.0) {
+        return rgbNits;
+    }
+
+    vec3 ictcp = linearToICtCp(rgbNits);
+    ictcp.x += (triangularIgn(px) - 0.5) * amp;
+    return max(iCtCpToLinear(ictcp), vec3(0.0));
 }

@@ -187,6 +187,8 @@ public:
         m_processingQuality->addItem(i18n("Fast"), 0);
         m_processingQuality->addItem(i18n("Balanced"), 1);
         m_processingQuality->addItem(i18n("Quality"), 2);
+        m_processingQuality->setToolTip(
+            i18n("Reserved for future polish tiers. Does not change brightness, exposure, tone curve, dither, or deband."));
         processingLayout->addRow(i18n("Processing quality:"), m_processingQuality);
 
         m_preferFloatCapture = new QCheckBox(i18n("Use float-precision window capture"), processingGroup);
@@ -196,21 +198,22 @@ public:
             i18n("Reference-aware tone curve (maps SDR white to calibration reference nits)"), processingGroup);
         processingLayout->addRow(m_useReferenceToneCurve);
 
-        m_debandStrength = new QDoubleSpinBox(processingGroup);
-        m_debandStrength->setRange(0.0, 1.0);
-        m_debandStrength->setSingleStep(0.05);
-        processingLayout->addRow(i18n("Deband strength:"), m_debandStrength);
+        m_postCurveDebandStrength = new QDoubleSpinBox(processingGroup);
+        m_postCurveDebandStrength->setRange(0.0, 1.0);
+        m_postCurveDebandStrength->setSingleStep(0.05);
+        m_postCurveDebandStrength->setToolTip(
+            i18n("Optional banding reduction after tone mapping. Does not run automatically at higher quality "
+                 "levels. Does not affect brightness when off. If you previously had DebandStrength set in config, "
+                 "reset it to zero here."));
+        processingLayout->addRow(i18n("Post-curve deband:"), m_postCurveDebandStrength);
 
         m_ditherStrength = new QDoubleSpinBox(processingGroup);
         m_ditherStrength->setRange(0.0, 1.0);
         m_ditherStrength->setDecimals(5);
         m_ditherStrength->setSingleStep(0.001);
+        m_ditherStrength->setToolTip(
+            i18n("Subtle luma dither in smooth gradient regions to reduce banding. Does not affect detailed texture."));
         processingLayout->addRow(i18n("Dither strength:"), m_ditherStrength);
-
-        m_postCurveDebandStrength = new QDoubleSpinBox(processingGroup);
-        m_postCurveDebandStrength->setRange(0.0, 1.0);
-        m_postCurveDebandStrength->setSingleStep(0.05);
-        processingLayout->addRow(i18n("Post-curve deband:"), m_postCurveDebandStrength);
 
         m_spatialHighlightRecovery = new QCheckBox(
             i18n("Enable spatial highlight recovery (experimental)"), processingGroup);
@@ -249,10 +252,9 @@ public:
         connect(m_processingQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_preferFloatCapture, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_useReferenceToneCurve, &QCheckBox::toggled, this, &KCModule::markAsChanged);
-        connect(m_debandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
-        connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_postCurveDebandStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
+        connect(m_ditherStrength, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_spatialHighlightRecovery, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(importButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::importProfile);
         connect(exportButton, &QPushButton::clicked, this, &AutoHdrEffectKcm::exportProfile);
@@ -283,9 +285,8 @@ public:
         m_processingQuality->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
         m_preferFloatCapture->setChecked(general.preferFloatCapture);
         m_useReferenceToneCurve->setChecked(general.useReferenceToneCurve);
-        m_debandStrength->setValue(general.debandStrength);
-        m_ditherStrength->setValue(general.ditherStrength);
         m_postCurveDebandStrength->setValue(general.postCurveDebandStrength);
+        m_ditherStrength->setValue(general.ditherStrength);
         m_spatialHighlightRecovery->setChecked(general.spatialHighlightRecovery);
 
         rebuildAppsTable();
@@ -335,7 +336,7 @@ public:
         general.processingQuality = m_processingQuality->currentData().toInt();
         general.preferFloatCapture = m_preferFloatCapture->isChecked();
         general.useReferenceToneCurve = m_useReferenceToneCurve->isChecked();
-        general.debandStrength = static_cast<float>(m_debandStrength->value());
+        general.debandStrength = 0.0f;
         general.ditherStrength = static_cast<float>(m_ditherStrength->value());
         general.postCurveDebandStrength = static_cast<float>(m_postCurveDebandStrength->value());
         general.spatialHighlightRecovery = m_spatialHighlightRecovery->isChecked();
@@ -478,7 +479,6 @@ private:
     QComboBox *m_processingQuality = nullptr;
     QCheckBox *m_preferFloatCapture = nullptr;
     QCheckBox *m_useReferenceToneCurve = nullptr;
-    QDoubleSpinBox *m_debandStrength = nullptr;
     QDoubleSpinBox *m_ditherStrength = nullptr;
     QDoubleSpinBox *m_postCurveDebandStrength = nullptr;
     QCheckBox *m_spatialHighlightRecovery = nullptr;

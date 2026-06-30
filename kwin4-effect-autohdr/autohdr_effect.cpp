@@ -388,7 +388,6 @@ namespace KWin {
         const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
         m_autoActivateCalibrated = general.autoActivateCalibrated;
         m_processingQuality = general.processingQuality;
-        m_debandStrength = general.debandStrength;
         m_ditherStrength = general.ditherStrength;
         m_postCurveDebandStrength = general.postCurveDebandStrength;
         m_spatialHighlightRecovery = general.spatialHighlightRecovery ? 1.0f : 0.0f;
@@ -497,7 +496,6 @@ namespace KWin {
         m_locToneCurveReferenceNits = m_shader->uniformLocation("toneCurveReferenceNits");
         m_locMinDisplayNits = m_shader->uniformLocation("minDisplayNits");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
-        m_locDebandStrength = m_shader->uniformLocation("debandStrength");
         m_locDitherStrength = m_shader->uniformLocation("ditherStrength");
         m_locProcessingQuality = m_shader->uniformLocation("processingQuality");
         warnMissingToneCurveUniformsOnce();
@@ -545,9 +543,6 @@ namespace KWin {
         }
         if (m_locMinDisplayNits >= 0) {
             m_shader->setUniform(m_locMinDisplayNits, m_hdrMinDisplayNits);
-        }
-        if (m_locDebandStrength >= 0) {
-            m_shader->setUniform(m_locDebandStrength, m_debandStrength);
         }
         if (m_locDitherStrength >= 0) {
             m_shader->setUniform(m_locDitherStrength, m_ditherStrength);
