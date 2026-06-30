@@ -32,6 +32,8 @@ float clampReferenceNits(float value);
 float clampBlackPoint(float value);
 float clampVibrance(float value);
 float clampGamutExpansion(float value);
+float clampCurveAntialiasStrength(float value);
+float clampHighlightSoftness(float value);
 
 struct AppProfileMetadata {
     QString key;
@@ -49,6 +51,8 @@ struct AppProfile {
 
 struct GeneralSettings {
     bool autoActivateCalibrated = true;
+    float curveAntialiasStrength = 0.35f;
+    float highlightSoftness = 0.25f;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";

@@ -178,6 +178,47 @@ QVector<QPointF> expandStepKnotsForEval(const QVector<QPointF> &points, const To
     return expanded;
 }
 
+void softenHighlightCurveSlope(float *lut, int size, float inputSpan)
+{
+    if (!lut || size < 4) {
+        return;
+    }
+
+    const int startIdx = qMax(1, static_cast<int>(size * 0.45f));
+    const float dx = qMax(inputSpan / static_cast<float>(size - 1), kEpsilon);
+    const float endTarget = lut[size - 1];
+
+    QVector<float> slopes;
+    slopes.reserve(size - startIdx);
+    for (int i = startIdx + 1; i < size; ++i) {
+        slopes.append((lut[i] - lut[i - 1]) / dx);
+    }
+    if (slopes.isEmpty()) {
+        return;
+    }
+
+    std::sort(slopes.begin(), slopes.end());
+    const float medianSlope = slopes[slopes.size() / 2];
+    const float maxSlope = qMax(medianSlope * 2.5f, 1.0f);
+    const float maxDelta = maxSlope * dx;
+
+    for (int i = startIdx + 1; i < size; ++i) {
+        if (lut[i] - lut[i - 1] > maxDelta) {
+            lut[i] = lut[i - 1] + maxDelta;
+        }
+    }
+
+    const float endActual = lut[size - 1];
+    if (endActual + kEpsilon < endTarget) {
+        const float restore = endTarget - endActual;
+        const int restoreSpan = size - 1 - startIdx;
+        for (int i = startIdx; i < size; ++i) {
+            const float t = static_cast<float>(i - startIdx) / static_cast<float>(qMax(restoreSpan, 1));
+            lut[i] += restore * t;
+        }
+    }
+}
+
 } // namespace
 
 QVector<QPointF> buildFullCurve(const ToneCurveEndpoints &endpoints, const QVector<QPointF> &intermediate)
@@ -297,6 +338,35 @@ void buildToneCurveLut(const QVector<QPointF> &fullCurve, float inputSpan, float
         const float u = static_cast<float>(i) / static_cast<float>(size - 1);
         const float inputNits = u * span;
         lut[i] = evaluateToneCurve(fullCurve, inputNits);
+    }
+
+    softenHighlightCurveSlope(lut, size, span);
+}
+
+void buildToneCurveSlopeLut(const float *lut, float *slopeLut, int size, float *maxSlopeOut)
+{
+    if (!lut || !slopeLut || size <= 0) {
+        return;
+    }
+
+    float maxSlope = 0.0f;
+    for (int i = 0; i < size; ++i) {
+        float tangent = 0.0f;
+        if (size == 1) {
+            tangent = 0.0f;
+        } else if (i == 0) {
+            tangent = lut[1] - lut[0];
+        } else if (i == size - 1) {
+            tangent = lut[size - 1] - lut[size - 2];
+        } else {
+            tangent = (lut[i + 1] - lut[i - 1]) * 0.5f;
+        }
+        slopeLut[i] = tangent;
+        maxSlope = qMax(maxSlope, std::abs(tangent));
+    }
+
+    if (maxSlopeOut) {
+        *maxSlopeOut = maxSlope;
     }
 }
 

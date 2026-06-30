@@ -106,6 +106,29 @@ public:
 
         layout->addWidget(defaultsGroup);
 
+        auto *smoothingGroup = new QGroupBox(i18n("HDR Output Smoothing"), widget());
+        auto *smoothingLayout = new QFormLayout(smoothingGroup);
+
+        m_curveAntialias = new QDoubleSpinBox(smoothingGroup);
+        m_curveAntialias->setRange(0.0, 100.0);
+        m_curveAntialias->setSuffix(QStringLiteral(" %"));
+        m_curveAntialias->setDecimals(0);
+        m_curveAntialias->setSingleStep(5.0);
+        m_curveAntialias->setToolTip(
+            i18n("Reduces harsh tone-curve transitions on anti-aliased edges such as text and thin UI lines."));
+        smoothingLayout->addRow(i18n("Curve anti-aliasing:"), m_curveAntialias);
+
+        m_highlightSoftness = new QDoubleSpinBox(smoothingGroup);
+        m_highlightSoftness->setRange(0.0, 100.0);
+        m_highlightSoftness->setSuffix(QStringLiteral(" %"));
+        m_highlightSoftness->setDecimals(0);
+        m_highlightSoftness->setSingleStep(5.0);
+        m_highlightSoftness->setToolTip(
+            i18n("Softens the transition into display peak luminance instead of hard clipping bright highlights."));
+        smoothingLayout->addRow(i18n("Highlight softness:"), m_highlightSoftness);
+
+        layout->addWidget(smoothingGroup);
+
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
         layout->addWidget(m_autoActivate);
 
@@ -126,6 +149,9 @@ public:
 
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
+        connect(m_curveAntialias, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_highlightSoftness, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                &KCModule::markAsChanged);
     }
 
     void load() override
@@ -145,7 +171,10 @@ public:
                                      globals.toneCurvePoints, globals.blackPoint, globals.toneCurvePreset,
                                      globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion);
 
-        m_autoActivate->setChecked(AutoHdr::loadGeneralSettings(m_config).autoActivateCalibrated);
+        const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        m_autoActivate->setChecked(general.autoActivateCalibrated);
+        m_curveAntialias->setValue(general.curveAntialiasStrength * 100.0);
+        m_highlightSoftness->setValue(general.highlightSoftness * 100.0);
 
         rebuildAppsTable();
     }
@@ -184,6 +213,10 @@ public:
 
         AutoHdr::GeneralSettings general;
         general.autoActivateCalibrated = m_autoActivate->isChecked();
+        general.curveAntialiasStrength =
+            AutoHdr::clampCurveAntialiasStrength(static_cast<float>(m_curveAntialias->value() / 100.0));
+        general.highlightSoftness =
+            AutoHdr::clampHighlightSoftness(static_cast<float>(m_highlightSoftness->value() / 100.0));
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -260,6 +293,8 @@ private:
 
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
+    QDoubleSpinBox *m_curveAntialias = nullptr;
+    QDoubleSpinBox *m_highlightSoftness = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;
     QStringList m_appKeys;
