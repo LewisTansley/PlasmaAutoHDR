@@ -3,7 +3,7 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 
-#include "tone_curve_editor.h"
+#include "ui/tone_curve_editor.h"
 
 #include "tone_curve.h"
 #include "tone_curve_presets.h"
@@ -262,6 +262,57 @@ void ToneCurveEditor::setBlackPoint(float blackPoint)
     m_blackPointValue = AutoHdr::clampBlackPoint(blackPoint);
     m_blackPoint->setValue(m_blackPointValue);
     m_blockSignals = false;
+}
+
+void ToneCurveEditor::setOverlayMode(bool overlayMode)
+{
+    if (m_overlayMode == overlayMode) {
+        return;
+    }
+
+    m_overlayMode = overlayMode;
+    setAttribute(Qt::WA_TranslucentBackground, overlayMode);
+    if (overlayMode) {
+        applyOverlayStyleSheet();
+        if (m_plotHost) {
+            m_plotHost->setAttribute(Qt::WA_TranslucentBackground, true);
+            m_plotHost->setAutoFillBackground(false);
+        }
+    } else {
+        setStyleSheet(QString());
+        if (m_plotHost) {
+            m_plotHost->setAttribute(Qt::WA_TranslucentBackground, false);
+        }
+    }
+    update();
+}
+
+void ToneCurveEditor::setOverlayLuminanceFactor(float factor)
+{
+    const float clamped = qBound(0.1f, factor, 1.0f);
+    if (qFuzzyCompare(m_overlayLuminanceFactor, clamped)) {
+        return;
+    }
+
+    m_overlayLuminanceFactor = clamped;
+    if (m_overlayMode) {
+        applyOverlayStyleSheet();
+        update();
+    }
+}
+
+void ToneCurveEditor::applyOverlayStyleSheet()
+{
+    setStyleSheet(QStringLiteral(
+        "ToneCurveEditor { background: transparent; }"
+        "QLabel { color: #ffffff; background: transparent; }"
+        "QComboBox, QSpinBox, QDoubleSpinBox, QPushButton {"
+        "  background: rgba(40, 40, 40, 220);"
+        "  color: #ffffff;"
+        "  border: 1px solid rgba(255, 255, 255, 90);"
+        "  border-radius: 4px;"
+        "  padding: 2px 6px;"
+        "}"));
 }
 
 QRectF ToneCurveEditor::plotHostRect() const
@@ -667,9 +718,12 @@ void ToneCurveEditor::drawReferenceOverlay(QPainter &painter, const QRectF &plot
 void ToneCurveEditor::drawPlot(QPainter &painter, const QRectF &plot) const
 {
     const QRectF host = plotHostRect();
-    painter.fillRect(host, QColor(32, 32, 32));
+    if (!m_overlayMode) {
+        painter.fillRect(host, QColor(32, 32, 32));
+    }
 
-    painter.setPen(QColor(70, 70, 70));
+    const QColor gridColor = m_overlayMode ? QColor(160, 160, 160) : QColor(70, 70, 70);
+    painter.setPen(gridColor);
     for (int i = 1; i < 4; ++i) {
         const qreal t = plot.left() + (plot.width() * i) / 4.0;
         painter.drawLine(QPointF(t, plot.top()), QPointF(t, plot.bottom()));
@@ -679,7 +733,8 @@ void ToneCurveEditor::drawPlot(QPainter &painter, const QRectF &plot) const
 
     drawReferenceOverlay(painter, plot);
 
-    painter.setPen(QColor(90, 90, 90));
+    const QColor diagonalColor = m_overlayMode ? QColor(200, 200, 200) : QColor(90, 90, 90);
+    painter.setPen(diagonalColor);
     painter.drawLine(nitsToPixel(0.0f, 0.0f), nitsToPixel(m_referenceNitsValue, m_referenceNitsValue));
 
     const QVector<QPointF> curve = fullCurve();
@@ -698,11 +753,12 @@ void ToneCurveEditor::drawPlot(QPainter &painter, const QRectF &plot) const
                 path.lineTo(pixel);
             }
         }
-        painter.setPen(QPen(QColor(240, 240, 240), 2));
+        const QColor curveColor = m_overlayMode ? QColor(255, 255, 255) : QColor(240, 240, 240);
+        painter.setPen(QPen(curveColor, 2));
         painter.drawPath(path);
     }
 
-    painter.setBrush(QColor(160, 160, 160));
+    painter.setBrush(m_overlayMode ? QColor(220, 220, 220) : QColor(160, 160, 160));
     painter.setPen(Qt::NoPen);
     painter.drawEllipse(nitsToPixel(0.0f, 0.0f), 4, 4);
 
@@ -715,7 +771,8 @@ void ToneCurveEditor::drawPlot(QPainter &painter, const QRectF &plot) const
     painter.drawEllipse(nitsToPixel(static_cast<float>(m_sdrMaxPoint.x()), static_cast<float>(m_sdrMaxPoint.y())),
                         kHandleRadius, kHandleRadius);
 
-    painter.setPen(QColor(180, 180, 180));
+    const QColor labelColor = m_overlayMode ? QColor(230, 230, 230) : QColor(180, 180, 180);
+    painter.setPen(labelColor);
     const qreal bottomLabelHeight = host.bottom() - plot.bottom();
     painter.drawText(QRectF(plot.left(), plot.bottom(), plot.width() / 2.0, bottomLabelHeight), Qt::AlignLeft | Qt::AlignTop,
                      tr("0 nits"));

@@ -1,5 +1,8 @@
 #include "autohdr_effect.h"
+#include "autohdr_display.h"
+#include <core/backendoutput.h>
 #include <core/colorspace.h>
+#include <core/region.h>
 #include <core/pixelgrid.h>
 #include <core/rendertarget.h>
 #include <core/renderviewport.h>
@@ -15,7 +18,9 @@
 #include <scene/item.h>
 #include <scene/itemgeometry.h>
 #include <scene/windowitem.h>
+#include <scene/scene.h>
 #include <window.h>
+#include <workspace.h>
 #include <QAction>
 #include <QDBusConnection>
 #include <QDir>
@@ -24,8 +29,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QProcess>
-#include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
@@ -135,11 +138,14 @@ namespace KWin {
         connect(effects, &EffectsHandler::windowClosed, this, [this](EffectWindow *w) {
             m_activeWindows.remove(w);
             m_pendingUnredirects.remove(w);
+            disconnectWindowOutputTracking(w);
+            removeStatusToast(w);
             if (w == m_calibratingWindow) {
-                m_calibratingWindow = nullptr;
-                m_calibratingAppKey.clear();
+                closeCalibrationOverlay(false);
             }
         });
+
+        connectOutputTracking();
 
         const QString shaderPath = locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/autohdr.frag"));
         if (shaderPath.isEmpty()) {
@@ -158,6 +164,15 @@ namespace KWin {
     {
         unregisterDBusService();
         effects->hideOnScreenMessage();
+        if (m_calibrationOverlay) {
+            m_calibrationOverlay->hide();
+            delete m_calibrationOverlay;
+            m_calibrationOverlay = nullptr;
+        }
+        const QList<EffectWindow *> toastWindows = m_statusToasts.keys();
+        for (EffectWindow *window : toastWindows) {
+            removeStatusToast(window);
+        }
         if (effects->makeOpenGLContextCurrent()) {
             QList<EffectWindow *> redirected;
             for (const auto &entry : m_offscreenWindows) {
@@ -170,6 +185,7 @@ namespace KWin {
         m_offscreenWindows.clear();
         m_activeWindows.clear();
         m_pendingUnredirects.clear();
+        disconnectOutputTracking();
         destroyOffscreenConnections();
         m_calibratingWindow = nullptr;
     }
@@ -198,66 +214,6 @@ namespace KWin {
         KGlobalAccel::self()->setShortcut(action, active, KGlobalAccel::Autoloading);
     }
 
-    QString AutoHDREffect::calibrationScriptPath() const
-    {
-        const QStringList candidates = QStandardPaths::locateAll(QStandardPaths::GenericDataLocation,
-                                                                 QStringLiteral("kwin/effects/autohdr/plasma-autohdr-calibrate"));
-        for (const QString &path : candidates) {
-            if (QFileInfo::exists(path)) {
-                return path;
-            }
-        }
-        return QString();
-    }
-
-    QProcessEnvironment AutoHDREffect::calibrationProcessEnvironment() const
-    {
-        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-
-        if (!env.contains(QStringLiteral("HOME"))) {
-            env.insert(QStringLiteral("HOME"), QDir::homePath());
-        }
-
-        if (!env.contains(QStringLiteral("WAYLAND_DISPLAY"))) {
-            const QString runtimeDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-            const QDir runtime(runtimeDir);
-            const QStringList sockets = runtime.entryList({QStringLiteral("wayland-*")}, QDir::Files);
-            if (!sockets.isEmpty()) {
-                env.insert(QStringLiteral("WAYLAND_DISPLAY"), sockets.constFirst());
-            }
-        }
-
-        if (!env.contains(QStringLiteral("DISPLAY"))) {
-            env.insert(QStringLiteral("DISPLAY"), QStringLiteral(":1"));
-        }
-
-        const QString runtimeDir =
-            env.contains(QStringLiteral("XDG_RUNTIME_DIR"))
-                ? env.value(QStringLiteral("XDG_RUNTIME_DIR"))
-                : QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-        if (!runtimeDir.isEmpty()) {
-            if (!env.contains(QStringLiteral("XDG_RUNTIME_DIR"))) {
-                env.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtimeDir);
-            }
-            if (!env.contains(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"))) {
-                env.insert(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), runtimeDir + QStringLiteral("/bus"));
-            }
-        }
-
-        if (!m_calibratingAppKey.isEmpty()) {
-            env.insert(QStringLiteral("AUTOHDR_APP_KEY"), m_calibratingAppKey);
-            const WindowIdentifiers ids = identifiersForWindow(m_calibratingWindow);
-            env.insert(QStringLiteral("AUTOHDR_APP_DISPLAY_NAME"), ids.displayName);
-            env.insert(QStringLiteral("AUTOHDR_WINDOW_CLASS"), ids.windowClass);
-            env.insert(QStringLiteral("AUTOHDR_RESOURCE_CLASS"), ids.resourceClass);
-            env.insert(QStringLiteral("AUTOHDR_DESKTOP_FILE"), ids.desktopFile);
-            if (!AutoHdr::hasAppProfile(m_config, m_calibratingAppKey)) {
-                env.insert(QStringLiteral("AUTOHDR_APP_IS_NEW"), QStringLiteral("1"));
-            }
-        }
-
-        return env;
-    }
 
     bool AutoHDREffect::isActive() const
     {
@@ -362,6 +318,10 @@ namespace KWin {
 
     AutoHDREffect::CalibrationSettings AutoHDREffect::settingsForWindow(EffectWindow *window) const
     {
+        if (window == m_calibratingWindow && m_calibrationDraftActive) {
+            return m_calibrationDraft;
+        }
+
         if (window == m_calibratingWindow && !m_calibratingAppKey.isEmpty()) {
             return settingsForAppKey(m_calibratingAppKey);
         }
@@ -379,6 +339,7 @@ namespace KWin {
         const HdrDisplayLimits limits = readHdrDisplayLimits();
         m_hdrReferenceNits = static_cast<float>(limits.referenceNits);
         m_hdrMaxDisplayNits = static_cast<float>(limits.maxDisplayNits);
+        onOutputConfigurationChanged();
     }
 
     void AutoHDREffect::sanitizeGlobalDefaults(bool persist)
@@ -418,7 +379,9 @@ namespace KWin {
         QList<EffectWindow *> windows = m_activeWindows.keys();
         for (EffectWindow *window : windows) {
             CalibrationSettings settings;
-            if (window == m_calibratingWindow && !m_calibratingAppKey.isEmpty()) {
+            if (window == m_calibratingWindow && m_calibrationDraftActive) {
+                settings = m_calibrationDraft;
+            } else if (window == m_calibratingWindow && !m_calibratingAppKey.isEmpty()) {
                 settings = settingsForAppKey(m_calibratingAppKey);
             } else {
                 const QString key = resolvedAppKeyForWindow(window);
@@ -654,8 +617,138 @@ namespace KWin {
         m_windowDeletedConnection = {};
     }
 
+    void AutoHDREffect::connectOutputTracking()
+    {
+        if (m_outputTrackingConnected) {
+            return;
+        }
+        m_outputTrackingConnected = true;
+
+        rebindOutputHdrConnections();
+        m_screenListConnections.append(connect(effects, &EffectsHandler::screenAdded, this,
+                                               [this](LogicalOutput *) {
+                                                   rebindOutputHdrConnections();
+                                                   onOutputConfigurationChanged();
+                                               }));
+        m_screenListConnections.append(connect(effects, &EffectsHandler::screenRemoved, this,
+                                               [this](LogicalOutput *) {
+                                                   rebindOutputHdrConnections();
+                                                   onOutputConfigurationChanged();
+                                               }));
+    }
+
+    void AutoHDREffect::disconnectOutputTracking()
+    {
+        if (!m_outputTrackingConnected) {
+            return;
+        }
+
+        for (const QMetaObject::Connection &connection : std::as_const(m_outputHdrConnections)) {
+            disconnect(connection);
+        }
+        m_outputHdrConnections.clear();
+
+        for (const QMetaObject::Connection &connection : std::as_const(m_screenListConnections)) {
+            disconnect(connection);
+        }
+        m_screenListConnections.clear();
+
+        m_outputTrackingConnected = false;
+    }
+
+    void AutoHDREffect::rebindOutputHdrConnections()
+    {
+        for (const QMetaObject::Connection &connection : std::as_const(m_outputHdrConnections)) {
+            disconnect(connection);
+        }
+        m_outputHdrConnections.clear();
+
+        const QList<LogicalOutput *> outputs = effects->screens();
+        for (LogicalOutput *output : outputs) {
+            if (!output) {
+                continue;
+            }
+            BackendOutput *backend = output->backendOutput();
+            if (!backend) {
+                continue;
+            }
+            m_outputHdrConnections.append(connect(backend, &BackendOutput::highDynamicRangeChanged, this,
+                                                  &AutoHDREffect::onOutputConfigurationChanged));
+            m_outputHdrConnections.append(connect(backend, &BackendOutput::colorDescriptionChanged, this,
+                                                  &AutoHDREffect::onOutputConfigurationChanged));
+        }
+    }
+
+    void AutoHDREffect::connectWindowOutputTracking(EffectWindow *window)
+    {
+        if (!window || m_windowOutputConnections.contains(window)) {
+            return;
+        }
+
+        const auto onOutputChanged = [this, window]() {
+            onWindowOutputChanged(window);
+        };
+
+        QMetaObject::Connection connection;
+        if (Window *coreWindow = window->window()) {
+            connection = connect(coreWindow, &Window::outputChanged, this, onOutputChanged);
+        } else {
+            connection = connect(window, &EffectWindow::windowFrameGeometryChanged, this,
+                                 [onOutputChanged](EffectWindow *, const RectF &) {
+                                     onOutputChanged();
+                                 });
+        }
+
+        m_windowOutputConnections.insert(window, connection);
+    }
+
+    void AutoHDREffect::disconnectWindowOutputTracking(EffectWindow *window)
+    {
+        const auto it = m_windowOutputConnections.find(window);
+        if (it == m_windowOutputConnections.end()) {
+            return;
+        }
+
+        disconnect(it.value());
+        m_windowOutputConnections.erase(it);
+    }
+
+    void AutoHDREffect::onOutputConfigurationChanged()
+    {
+        repaintActiveWindows();
+    }
+
+    void AutoHDREffect::onWindowOutputChanged(EffectWindow *window)
+    {
+        if (!window) {
+            return;
+        }
+
+        window->addRepaintFull();
+        effects->addRepaintFull();
+
+        if (!m_activeWindows.contains(window)) {
+            return;
+        }
+
+        const bool onHdr = AutoHdr::windowOnHdrOutput(window);
+        WindowStatusToast &state = m_statusToasts[window];
+        if (state.wasOnHdrOutput == onHdr) {
+            return;
+        }
+
+        state.wasOnHdrOutput = onHdr;
+        showStatusToast(window, onHdr ? QStringLiteral("AutoHDR enabled")
+                                      : QStringLiteral("AutoHDR suspended — SDR display"));
+    }
+
     void AutoHDREffect::handleWindowDeleted(EffectWindow *window)
     {
+        if (window == m_calibratingWindow) {
+            closeCalibrationOverlay(false);
+        }
+        removeStatusToast(window);
+        disconnectWindowOutputTracking(window);
         unredirect(window);
     }
 
@@ -674,8 +767,14 @@ namespace KWin {
                     it->second->isDirty = true;
                 }
             });
+        data->windowExpandedGeometryConnection =
+            connect(window, &EffectWindow::windowExpandedGeometryChanged, this, [window]() {
+                window->addRepaintFull();
+            });
 
         m_offscreenWindows.emplace(window, std::move(data));
+        m_statusToasts[window].wasOnHdrOutput = AutoHdr::windowOnHdrOutput(window);
+        connectWindowOutputTracking(window);
         if (m_offscreenWindows.size() == 1) {
             setupOffscreenConnections();
         }
@@ -693,6 +792,8 @@ namespace KWin {
         }
 
         disconnect(it->second->windowDamagedConnection);
+        disconnect(it->second->windowExpandedGeometryConnection);
+        disconnectWindowOutputTracking(window);
         m_offscreenWindows.erase(it);
         if (m_offscreenWindows.empty()) {
             destroyOffscreenConnections();
@@ -708,7 +809,7 @@ namespace KWin {
 
         OffscreenWindowData *offscreenData = it->second.get();
         const qreal scale = window->screen()->scale();
-        const RectF logicalGeometry = snapToPixels(window->expandedGeometry(), scale);
+        const RectF logicalGeometry = snapToPixels(window->frameGeometry(), scale);
         const QSize textureSize = (logicalGeometry.size() * scale).toSize();
 
         if (textureSize.isEmpty()) {
@@ -820,6 +921,32 @@ namespace KWin {
         vbo->unbindArrays();
     }
 
+    void AutoHDREffect::paintCompositorMargin(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                                              EffectWindow *window, int mask, const Region &deviceRegion,
+                                              WindowPaintData &data)
+    {
+        const RectF expandedGeometry = snapToPixels(window->expandedGeometry(), viewport.scale());
+        const RectF frameGeometry = snapToPixels(window->frameGeometry(), viewport.scale());
+
+        const Rect expanded = expandedGeometry.toAlignedRect();
+        const Rect frame = frameGeometry.toAlignedRect();
+        if (expanded == frame) {
+            return;
+        }
+
+        Region marginRegion = Region(expanded) - Region(frame);
+        if (deviceRegion != Region::infinite()) {
+            marginRegion &= deviceRegion;
+        }
+        if (marginRegion.isEmpty()) {
+            return;
+        }
+
+        m_paintingCompositorMargin = true;
+        effects->drawWindow(renderTarget, viewport, window, mask, marginRegion, data);
+        m_paintingCompositorMargin = false;
+    }
+
     bool AutoHDREffect::blocksDirectScanout() const
     {
         return false;
@@ -896,6 +1023,8 @@ namespace KWin {
         }
 
         if (activateWindow(window, profile->settings)) {
+            m_statusToasts[window].wasOnHdrOutput = AutoHdr::windowOnHdrOutput(window);
+            showStatusToast(window, QStringLiteral("AutoHDR enabled"));
             qInfo() << "AutoHDR Effect: auto-activated for" << window->windowClass();
         }
     }
@@ -934,6 +1063,21 @@ namespace KWin {
         }
     }
 
+    void AutoHDREffect::prePaintScreen(ScreenPrePaintData &data)
+    {
+        m_currentPaintOutput = data.screen;
+        if (!m_currentPaintOutput && data.view) {
+            m_currentPaintOutput = data.view->logicalOutput();
+        }
+        effects->prePaintScreen(data);
+    }
+
+    void AutoHDREffect::postPaintScreen()
+    {
+        m_currentPaintOutput = nullptr;
+        effects->postPaintScreen();
+    }
+
     void AutoHDREffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data)
     {
         if (m_pendingUnredirects.contains(w) && !m_activeWindows.contains(w)) {
@@ -959,6 +1103,11 @@ namespace KWin {
             return;
         }
 
+        if (m_paintingCompositorMargin) {
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+            return;
+        }
+
         if (m_activeWindows.contains(window) && m_shader) {
             updateUniforms(m_activeWindows.value(window));
             if (m_toneCurveLutDirty) {
@@ -966,11 +1115,14 @@ namespace KWin {
             }
         }
 
-        const RectF expandedGeometry = snapToPixels(window->expandedGeometry(), viewport.scale());
+        if (!AutoHdr::shouldApplyHdrForPaint(effects, m_currentPaintOutput, viewport)) {
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+            return;
+        }
+
         const RectF frameGeometry = snapToPixels(window->frameGeometry(), viewport.scale());
 
-        RectF visibleRect = expandedGeometry;
-        visibleRect.moveTopLeft(expandedGeometry.topLeft() - frameGeometry.topLeft());
+        RectF visibleRect(0, 0, frameGeometry.width(), frameGeometry.height());
         WindowQuad quad;
         quad[0] = WindowVertex(visibleRect.topLeft(), QPointF(0, 0));
         quad[1] = WindowVertex(visibleRect.topRight(), QPointF(1, 0));
@@ -980,6 +1132,7 @@ namespace KWin {
         WindowQuadList quads;
         quads.append(quad);
 
+        paintCompositorMargin(renderTarget, viewport, window, mask, deviceRegion, data);
         maybeRenderOffscreen(window);
         paintOffscreen(renderTarget, viewport, window, mask, deviceRegion, data, quads);
     }
@@ -1004,6 +1157,7 @@ namespace KWin {
 
         if (m_activeWindows.contains(active)) {
             scheduleUnredirect(active);
+            showStatusToast(active, QStringLiteral("AutoHDR disabled"));
             qInfo() << "AutoHDR Effect: disabled for" << active->windowClass();
             return;
         }
@@ -1013,6 +1167,8 @@ namespace KWin {
             const QString knownKey = resolvedAppKeyForWindow(active);
             const CalibrationSettings settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
             activateWindow(active, settings);
+            m_statusToasts[active].wasOnHdrOutput = AutoHdr::windowOnHdrOutput(active);
+            showStatusToast(active, QStringLiteral("AutoHDR enabled"));
             qInfo() << "AutoHDR Effect: re-enabled for" << active->windowClass();
             return;
         }
@@ -1020,6 +1176,8 @@ namespace KWin {
         const QString knownKey = resolvedAppKeyForWindow(active);
         const CalibrationSettings settings = knownKey.isEmpty() ? m_globalDefaults : settingsForAppKey(knownKey);
         activateWindow(active, settings);
+        m_statusToasts[active].wasOnHdrOutput = AutoHdr::windowOnHdrOutput(active);
+        showStatusToast(active, QStringLiteral("AutoHDR enabled"));
         qInfo() << "AutoHDR Effect: enabled for" << active->windowClass();
     }
 
@@ -1089,72 +1247,329 @@ namespace KWin {
         }
     }
 
-    void AutoHDREffect::finishCalibration(bool saved)
+    void AutoHDREffect::applyCalibrationDraft()
     {
-        m_kdialogProcess = nullptr;
-        m_calibratingWindow = nullptr;
-        m_calibratingAppKey.clear();
-
-        reloadSettings();
-
-        if (saved) {
-            showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration confirmed"),
-                                         QStringLiteral("video-display"));
-        }
-    }
-
-    void AutoHDREffect::runCalibrationDialog()
-    {
-        const QString scriptPath = calibrationScriptPath();
-        if (scriptPath.isEmpty()) {
-            qWarning() << "AutoHDR Effect: calibration script not found";
-            showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration script not found"),
-                                         QStringLiteral("dialog-error"));
+        if (!m_calibratingWindow || !m_calibrationOverlay) {
             return;
         }
 
-        auto *process = new QProcess(this);
-        m_kdialogProcess = process;
+        m_calibrationDraft = m_calibrationOverlay->currentValues();
+        AutoHdr::sanitizeCalibrationSettings(m_calibrationDraft, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
+        m_calibrationDraftActive = true;
 
-        connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-            qWarning() << "AutoHDR Effect: calibration script error:" << error << process->errorString();
-            if (m_kdialogProcess == process) {
-                finishCalibration(false);
-                showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration dialog failed to open"),
-                                             QStringLiteral("dialog-error"));
+        if (m_activeWindows.contains(m_calibratingWindow)) {
+            m_activeWindows.insert(m_calibratingWindow, m_calibrationDraft);
+            activateWindow(m_calibratingWindow, m_calibrationDraft);
+        }
+        repaintActiveWindows();
+    }
+
+    void AutoHDREffect::restoreCalibrationBaseline()
+    {
+        m_calibrationDraft = m_calibrationBaseline;
+        m_calibrationDraftActive = false;
+        reloadActiveWindowSettings();
+        repaintActiveWindows();
+    }
+
+    void AutoHDREffect::saveCalibrationProfile()
+    {
+        if (m_calibratingAppKey.isEmpty() || !m_calibrationOverlay) {
+            return;
+        }
+
+        AutoHdr::AppProfile profile;
+        profile.metadata.key = m_calibratingAppKey;
+        if (m_calibratingWindow) {
+            const WindowIdentifiers ids = identifiersForWindow(m_calibratingWindow);
+            profile.metadata.displayName = ids.displayName;
+            profile.metadata.windowClass = ids.windowClass;
+            profile.metadata.resourceClass = ids.resourceClass;
+            profile.metadata.desktopFile = ids.desktopFile;
+        } else {
+            const std::optional<AutoHdr::AppProfile> existing = AutoHdr::loadAppProfile(m_config, m_calibratingAppKey);
+            if (existing) {
+                profile.metadata = existing->metadata;
+            } else {
+                profile.metadata.displayName = m_calibratingAppKey;
             }
-            process->deleteLater();
+        }
+        profile.metadata.autoActivate = true;
+        profile.settings = m_calibrationOverlay->currentValues();
+        AutoHdr::sanitizeCalibrationSettings(profile.settings, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
+        AutoHdr::saveAppProfile(m_config, profile);
+    }
+
+    void AutoHDREffect::applyInternalOverlayPresentation(QWidget *overlay)
+    {
+        QWindow *handle = overlay ? overlay->windowHandle() : nullptr;
+        if (!handle || !Workspace::self()) {
+            return;
+        }
+
+        Window *window = Workspace::self()->findInternal(handle);
+        if (!window) {
+            if (!m_warnedOverlayHdrPresentation) {
+                qInfo() << "AutoHDR Effect: overlay HDR presentation unavailable; using boosted SDR colors";
+                m_warnedOverlayHdrPresentation = true;
+            }
+            return;
+        }
+
+        constexpr float kOverlayPeakFactor = 0.8f;
+        const double peak = static_cast<double>(m_hdrMaxDisplayNits) * kOverlayPeakFactor;
+        const double avg = peak * 0.5;
+
+        window->setPreferredColorDescription(ColorDescription::BT2020PQ->withHdrMetadata(avg, peak));
+    }
+
+    void AutoHDREffect::applyInternalOverlayBlur(QWidget *overlay, const QRect &region)
+    {
+        QWindow *handle = overlay ? overlay->windowHandle() : nullptr;
+        if (!handle) {
+            return;
+        }
+
+        if (!effects->isEffectLoaded(QStringLiteral("blur"))) {
+            if (!m_warnedOverlayBlur) {
+                qInfo() << "AutoHDR Effect: overlay blur unavailable; enable the Blur desktop effect";
+                m_warnedOverlayBlur = true;
+            }
+            return;
+        }
+
+        if (region.isEmpty()) {
+            handle->setProperty("kwin_blur", QVariant());
+            return;
+        }
+
+        handle->setProperty("kwin_blur", QVariant::fromValue(KWin::RegionF(QRegion(region))));
+    }
+
+    void AutoHDREffect::applyOverlayHdrPresentation(CalibrationOverlay *overlay)
+    {
+        applyInternalOverlayPresentation(overlay);
+    }
+
+    void AutoHDREffect::applyOverlayBlur(CalibrationOverlay *overlay)
+    {
+        applyInternalOverlayBlur(overlay, overlay ? overlay->panelBlurRegion() : QRect());
+    }
+
+    void AutoHDREffect::showStatusToast(EffectWindow *window, const QString &message)
+    {
+        if (!window) {
+            return;
+        }
+
+        WindowStatusToast &state = m_statusToasts[window];
+        if (!state.overlay) {
+            state.overlay = new StatusToastOverlay();
+            connect(state.overlay.data(), &StatusToastOverlay::expired, this, [this, window]() {
+                hideStatusToast(window);
+            });
+            state.geometryConnection =
+                connect(window, &EffectWindow::windowFrameGeometryChanged, this,
+                        [this](EffectWindow *w, const RectF &) {
+                            syncStatusToastGeometry(w);
+                        });
+        }
+
+        state.overlay->setMessage(message);
+        syncStatusToastGeometry(window);
+        if (!state.overlay) {
+            return;
+        }
+
+        state.overlay->showFor(5000);
+        applyInternalOverlayPresentation(state.overlay);
+        applyInternalOverlayBlur(state.overlay, state.overlay->panelBlurRegion());
+    }
+
+    void AutoHDREffect::syncStatusToastGeometry(EffectWindow *window)
+    {
+        const auto it = m_statusToasts.find(window);
+        if (it == m_statusToasts.end() || !it->overlay) {
+            return;
+        }
+
+        StatusToastOverlay *overlay = it->overlay.data();
+        if (window->isMinimized() || !window->isOnCurrentDesktop()) {
+            overlay->hide();
+            return;
+        }
+
+        const QRect frame = window->frameGeometry().toRect();
+        if (!frame.isValid()) {
+            return;
+        }
+
+        constexpr int inset = 16;
+        const QSize pillSize = overlay->size();
+        const QPoint topLeft(frame.right() - pillSize.width() - inset + 1, frame.top() + inset);
+        overlay->setGeometry(QRect(topLeft, pillSize));
+
+        if (!overlay->isVisible()) {
+            overlay->show();
+        }
+        applyInternalOverlayPresentation(overlay);
+        applyInternalOverlayBlur(overlay, overlay->panelBlurRegion());
+    }
+
+    void AutoHDREffect::hideStatusToast(EffectWindow *window)
+    {
+        const auto it = m_statusToasts.find(window);
+        if (it == m_statusToasts.end()) {
+            return;
+        }
+
+        if (it->geometryConnection) {
+            disconnect(it->geometryConnection);
+            it->geometryConnection = {};
+        }
+
+        if (StatusToastOverlay *overlay = it->overlay.data()) {
+            if (QWindow *handle = overlay->windowHandle()) {
+                handle->setProperty("kwin_blur", QVariant());
+            }
+            overlay->hide();
+            overlay->deleteLater();
+        }
+
+        it->overlay = nullptr;
+    }
+
+    void AutoHDREffect::removeStatusToast(EffectWindow *window)
+    {
+        hideStatusToast(window);
+        m_statusToasts.remove(window);
+    }
+
+    void AutoHDREffect::syncCalibrationOverlayGeometry(EffectWindow *window)
+    {
+        if (!m_calibrationOverlay || !window || window != m_calibratingWindow) {
+            return;
+        }
+
+        if (window->isMinimized() || !window->isOnCurrentDesktop()) {
+            m_calibrationOverlay->hide();
+            return;
+        }
+
+        const QRect geometry = window->frameGeometry().toRect();
+        if (!geometry.isValid()) {
+            return;
+        }
+
+        m_calibrationOverlay->setGeometry(geometry);
+        if (!m_calibrationOverlay->isVisible()) {
+            m_calibrationOverlay->show();
+            m_calibrationOverlay->raise();
+            m_calibrationOverlay->activateWindow();
+        }
+        applyOverlayHdrPresentation(m_calibrationOverlay);
+        applyOverlayBlur(m_calibrationOverlay);
+    }
+
+    void AutoHDREffect::closeCalibrationOverlay(bool saved)
+    {
+        if (m_frameGeometryConnection) {
+            disconnect(m_frameGeometryConnection);
+            m_frameGeometryConnection = QMetaObject::Connection();
+        }
+
+        if (m_calibrationOverlay) {
+            if (QWindow *handle = m_calibrationOverlay->windowHandle()) {
+                handle->setProperty("kwin_blur", QVariant());
+            }
+            m_calibrationOverlay->hide();
+            m_calibrationOverlay->deleteLater();
+            m_calibrationOverlay = nullptr;
+        }
+
+        if (!saved && m_calibrationDraftActive) {
+            restoreCalibrationBaseline();
+        } else if (saved) {
+            m_calibrationDraftActive = false;
+            reloadSettings();
+            showTransientOnScreenMessage(QStringLiteral("AutoHDR calibration confirmed"),
+                                         QStringLiteral("video-display"));
+        } else {
+            m_calibrationDraftActive = false;
+        }
+
+        m_calibratingWindow = nullptr;
+        m_calibratingAppKey.clear();
+        effects->hideOnScreenMessage();
+    }
+
+    void AutoHDREffect::openCalibrationOverlay()
+    {
+        if (!m_calibratingWindow || m_calibratingAppKey.isEmpty()) {
+            return;
+        }
+
+        if (m_calibratingWindow->isMinimized()) {
+            showTransientOnScreenMessage(QStringLiteral("Restore the window before calibrating AutoHDR"),
+                                         QStringLiteral("dialog-warning"));
+            m_calibratingWindow = nullptr;
+            m_calibratingAppKey.clear();
+            return;
+        }
+
+        reloadHdrDisplayLimits();
+
+        m_calibrationBaseline = settingsForAppKey(m_calibratingAppKey);
+        m_calibrationDraft = m_calibrationBaseline;
+        m_calibrationDraftActive = true;
+
+        auto *overlay = new CalibrationOverlay();
+        m_calibrationOverlay = overlay;
+
+        overlay->setConfig(m_config);
+        overlay->setHdrLimits(qRound(m_hdrReferenceNits) + 1, qRound(m_hdrMaxDisplayNits));
+        overlay->setValues(m_calibrationDraft);
+
+        connect(overlay, &CalibrationOverlay::settingsChanged, this, &AutoHDREffect::applyCalibrationDraft);
+        connect(overlay, &CalibrationOverlay::settingsCommitted, this, &AutoHDREffect::applyCalibrationDraft);
+        connect(overlay, &CalibrationOverlay::confirmed, this, [this]() {
+            saveCalibrationProfile();
+            closeCalibrationOverlay(true);
+        });
+        connect(overlay, &CalibrationOverlay::cancelled, this, [this]() {
+            closeCalibrationOverlay(false);
         });
 
-        connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus) {
-            if (m_kdialogProcess == process) {
-                m_kdialogProcess = nullptr;
+        m_frameGeometryConnection = connect(m_calibratingWindow, &EffectWindow::windowFrameGeometryChanged, this,
+                                            [this](EffectWindow *window, const RectF &) {
+                                                syncCalibrationOverlayGeometry(window);
+                                            });
+
+        syncCalibrationOverlayGeometry(m_calibratingWindow);
+        overlay->show();
+        overlay->raise();
+        overlay->activateWindow();
+        overlay->setFocus();
+        QTimer::singleShot(0, this, [this, overlay]() {
+            if (m_calibrationOverlay == overlay) {
+                applyOverlayHdrPresentation(overlay);
+                applyOverlayBlur(overlay);
             }
-
-            process->deleteLater();
-            effects->hideOnScreenMessage();
-
-            if (exitCode != 0) {
-                qInfo() << "AutoHDR Effect: calibration dialog cancelled";
-                finishCalibration(false);
-                return;
-            }
-
-            finishCalibration(true);
         });
 
-        qInfo() << "AutoHDR Effect: launching calibration script" << scriptPath;
-        process->setProcessEnvironment(calibrationProcessEnvironment());
-        process->start(scriptPath, QStringList());
+        if (!m_activeWindows.contains(m_calibratingWindow)) {
+            activateWindow(m_calibratingWindow, m_calibrationDraft);
+        } else {
+            applyCalibrationDraft();
+        }
     }
 
     void AutoHDREffect::toggleOverlay()
     {
-        if (m_kdialogProcess && m_kdialogProcess->state() != QProcess::NotRunning) {
-            qInfo() << "AutoHDR Effect: calibration dialog already open";
+        if (m_calibrationOverlay) {
+            closeCalibrationOverlay(false);
             return;
         }
-        m_kdialogProcess = nullptr;
 
         EffectWindow *active = effects->activeWindow();
         if (!active) {
@@ -1163,18 +1578,33 @@ namespace KWin {
             return;
         }
 
+        if (!isEligibleWindow(active)) {
+            showTransientOnScreenMessage(QStringLiteral("This window type cannot be calibrated"),
+                                         QStringLiteral("dialog-warning"));
+            return;
+        }
+
         m_calibratingWindow = active;
         m_calibratingAppKey = appKeyForWindow(active);
 
-        if (!m_activeWindows.contains(active)) {
-            const CalibrationSettings settings = settingsForWindow(active);
-            activateWindow(active, settings);
+        if (!m_calibratingAppKey.isEmpty()) {
+            const QString knownKey = findKnownAppKey(active);
+            if (!knownKey.isEmpty()) {
+                m_calibratingAppKey = knownKey;
+            }
         }
 
-        qInfo() << "AutoHDR Effect: opening calibration for" << active->windowClass()
+        if (m_calibratingAppKey.isEmpty()) {
+            showTransientOnScreenMessage(QStringLiteral("Could not identify the active application"),
+                                         QStringLiteral("dialog-warning"));
+            m_calibratingWindow = nullptr;
+            return;
+        }
+
+        qInfo() << "AutoHDR Effect: opening calibration overlay for" << active->windowClass()
                 << "app key" << m_calibratingAppKey;
         showTransientOnScreenMessage(QStringLiteral("Opening AutoHDR calibration…"), QStringLiteral("configure"));
-        QMetaObject::invokeMethod(this, &AutoHDREffect::runCalibrationDialog, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, &AutoHDREffect::openCalibrationOverlay, Qt::QueuedConnection);
     }
 
 } // namespace KWin

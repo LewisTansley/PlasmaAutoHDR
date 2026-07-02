@@ -120,6 +120,23 @@ float edgeFlatness(float localGrad)
     return 1.0 - smoothstep(0.002, 0.015, localGrad);
 }
 
+float alphaCoherence(float centerA, float neighborA)
+{
+    float delta = abs(centerA - neighborA);
+    return 1.0 - smoothstep(0.05, 0.25, delta);
+}
+
+float silhouetteEdgeWeight(float centerA, float neighborA)
+{
+    float delta = abs(centerA - neighborA);
+    return smoothstep(0.15, 0.5, delta);
+}
+
+float spatialProcessingWeight(float centerA)
+{
+    return smoothstep(0.02, 0.15, centerA);
+}
+
 float microEdgeWeight(float lumaGradRel)
 {
     return smoothstep(0.006, 0.012, lumaGradRel) * (1.0 - smoothstep(0.05, 0.12, lumaGradRel));
@@ -158,9 +175,10 @@ float curveLookupLumaNits(vec3 rgbNits, float refNits, float blackPointOffset)
     return t * refNits;
 }
 
-float poolCurveInputLuma(vec3 centerNits, vec3 neighborNits[4], float refNits, float blackPointOffset,
-                       float strength, float inputSpan, float maxSlope)
+float poolCurveInputLuma(vec3 centerNits, vec3 neighborNits[4], float centerAlpha, float neighborAlphas[4],
+                       float refNits, float blackPointOffset, float strength, float inputSpan, float maxSlope)
 {
+    strength *= spatialProcessingWeight(centerAlpha);
     if (strength <= 0.0) {
         return 0.0;
     }
@@ -172,13 +190,19 @@ float poolCurveInputLuma(vec3 centerNits, vec3 neighborNits[4], float refNits, f
     float weight = 1.0;
 
     for (int i = 0; i < 4; ++i) {
+        if (neighborAlphas[i] < 0.02) {
+            continue;
+        }
+
         float neighborLookup = curveLookupLumaNits(neighborNits[i], ref, blackPointOffset);
         float lumaGradRel = abs(neighborLookup - centerLookup) / ref;
         float microW = microEdgeWeight(lumaGradRel);
         float hueW = chromaCoherence(centerNits / ref, neighborNits[i] / ref);
         float highlightW = highlightRegionWeight(centerRel);
         float slopeW = curveSlopeWeight(centerLookup, inputSpan, maxSlope);
-        float w = microW * hueW * highlightW * max(slopeW, 0.15) * strength;
+        float alphaW = alphaCoherence(centerAlpha, neighborAlphas[i])
+                     * (1.0 - silhouetteEdgeWeight(centerAlpha, neighborAlphas[i]));
+        float w = microW * hueW * highlightW * max(slopeW, 0.15) * alphaW * strength;
         pooled += neighborLookup * w;
         weight += w;
     }
@@ -239,8 +263,10 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits,
 }
 
 vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 neighbor2, vec3 neighbor3,
-                         float strength, float refNits, float localGrad, float curveAaStrength)
+                         float centerAlpha, float neighborAlphas[4], float strength, float refNits, float localGrad,
+                         float curveAaStrength)
 {
+    strength *= spatialProcessingWeight(centerAlpha);
     if (strength <= 0.0) {
         return centerNits;
     }
@@ -258,13 +284,19 @@ vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighbor0, vec3 neighbor1, vec3 n
 
     vec3 neighbors[4] = vec3[4](neighbor0, neighbor1, neighbor2, neighbor3);
     for (int i = 0; i < 4; ++i) {
+        if (neighborAlphas[i] < 0.02) {
+            continue;
+        }
+
         float neighborLuma = dot(neighbors[i] / ref, AUTOHDR_LUMA);
         float lumaGradRel = abs(neighborLuma - centerLuma);
         float microW = microEdgeWeight(lumaGradRel);
         float flatW = quantFlatness(neighborLuma - centerLuma) * regionW * edgeW;
-        float w = max(flatW, microW * curveAaStrength) * strength;
+        float silW = silhouetteEdgeWeight(centerAlpha, neighborAlphas[i]);
+        float alphaW = alphaCoherence(centerAlpha, neighborAlphas[i]) * (1.0 - silW);
+        float w = max(flatW, microW * curveAaStrength) * alphaW * strength;
         float blended = (centerLuma + neighborLuma) * 0.5;
-        if (microW <= flatW) {
+        if (microW <= flatW || silW > 0.5) {
             blended = min(blended, centerLuma);
         }
         targetLuma += blended * w;

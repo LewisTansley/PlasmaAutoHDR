@@ -23,11 +23,16 @@ kcoreaddons_add_plugin(kwin4_effect_autohdr
     SOURCES
         autohdr_effect.cpp
         autohdr_config.cpp
+        calibration_overlay.cpp
+        status_toast_overlay.cpp
         tone_curve.cpp
         tone_curve_presets.cpp
         tone_curve_user_presets.cpp
+        ui/tone_curve_editor.cpp
     INSTALL_NAMESPACE "kwin/effects/plugins"
 )
+
+target_include_directories(kwin4_effect_autohdr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(kwin4_effect_autohdr
     PRIVATE
@@ -35,6 +40,7 @@ target_link_libraries(kwin4_effect_autohdr
     Qt6::Core
     Qt6::Gui
     Qt6::DBus
+    Qt6::Widgets
     KF6::CoreAddons
     KF6::ConfigCore
     KF6::GlobalAccel

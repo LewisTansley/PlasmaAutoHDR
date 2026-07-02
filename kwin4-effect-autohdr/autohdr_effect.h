@@ -1,11 +1,14 @@
 #pragma once
 #include "autohdr_config.h"
+#include "calibration_overlay.h"
+#include "status_toast_overlay.h"
 #include "tone_curve.h"
 #include <effect/effect.h>
 #include <scene/item.h>
 #include <KSharedConfig>
 #include <QDateTime>
 #include <QHash>
+#include <QList>
 #include <QPointer>
 #include <QSet>
 #include <QString>
@@ -13,8 +16,6 @@
 #include <memory>
 
 class QAction;
-class QProcess;
-class QProcessEnvironment;
 
 namespace KWin {
 
@@ -22,6 +23,7 @@ namespace KWin {
     class GLShader;
     class GLTexture;
     class EffectWindow;
+    class LogicalOutput;
     class RenderView;
     struct WindowPrePaintData;
 
@@ -45,6 +47,8 @@ namespace KWin {
         Q_SCRIPTABLE void reloadSettings();
 
     protected:
+        void prePaintScreen(ScreenPrePaintData &data) override;
+        void postPaintScreen() override;
         void prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data) override;
         void drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window, int mask,
                         const Region &deviceRegion, WindowPaintData &data) override;
@@ -55,6 +59,7 @@ namespace KWin {
             std::unique_ptr<GLFramebuffer> fbo;
             bool isDirty = true;
             QMetaObject::Connection windowDamagedConnection;
+            QMetaObject::Connection windowExpandedGeometryConnection;
             ItemEffect windowEffect;
         };
 
@@ -63,6 +68,12 @@ namespace KWin {
             QString resourceClass;
             QString windowClass;
             QString displayName;
+        };
+
+        struct WindowStatusToast {
+            QPointer<StatusToastOverlay> overlay;
+            QMetaObject::Connection geometryConnection;
+            bool wasOnHdrOutput = false;
         };
 
         void loadGlobalDefaults(bool persistSanitize = true);
@@ -79,12 +90,27 @@ namespace KWin {
         void maybeRenderOffscreen(EffectWindow *window);
         void paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window,
                             int mask, const Region &deviceRegion, const WindowPaintData &data, const WindowQuadList &quads);
+        void paintCompositorMargin(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window,
+                                   int mask, const Region &deviceRegion, WindowPaintData &data);
         void handleWindowDeleted(EffectWindow *window);
         void setupOffscreenConnections();
         void destroyOffscreenConnections();
         GLenum redirectInternalFormat() const;
-        void runCalibrationDialog();
-        void finishCalibration(bool saved);
+        void openCalibrationOverlay();
+        void closeCalibrationOverlay(bool saved);
+        void syncCalibrationOverlayGeometry(EffectWindow *window);
+        void applyCalibrationDraft();
+        void restoreCalibrationBaseline();
+        void saveCalibrationProfile();
+        void applyInternalOverlayPresentation(QWidget *overlay);
+        void applyInternalOverlayBlur(QWidget *overlay, const QRect &region);
+        void applyOverlayHdrPresentation(CalibrationOverlay *overlay);
+        void applyOverlayBlur(CalibrationOverlay *overlay);
+        void showStatusToast(EffectWindow *window, const QString &message);
+        void syncStatusToastGeometry(EffectWindow *window);
+        void hideStatusToast(EffectWindow *window);
+        void removeStatusToast(EffectWindow *window);
+        void onWindowOutputChanged(EffectWindow *window);
         void showTransientOnScreenMessage(const QString &message, const QString &iconName = QString());
         void repaintActiveWindows();
         void reloadHdrDisplayLimits();
@@ -92,8 +118,6 @@ namespace KWin {
         void registerDBusService();
         void unregisterDBusService();
         void registerEffectShortcut(QAction *action, const QString &friendlyName, const QKeySequence &defaultShortcut);
-        QString calibrationScriptPath() const;
-        QProcessEnvironment calibrationProcessEnvironment() const;
         void maybeAutoActivateWindow(EffectWindow *window);
         void reevaluateAllWindows();
         CalibrationSettings settingsForWindow(EffectWindow *window) const;
@@ -107,6 +131,12 @@ namespace KWin {
         void computeToneCurveLut(const CalibrationSettings &settings);
         void uploadToneCurveUniforms();
         void warnMissingToneCurveUniformsOnce();
+        void connectOutputTracking();
+        void disconnectOutputTracking();
+        void rebindOutputHdrConnections();
+        void connectWindowOutputTracking(EffectWindow *window);
+        void disconnectWindowOutputTracking(EffectWindow *window);
+        void onOutputConfigurationChanged();
 
         QAction *m_toggleAction = nullptr;
         QAction *m_overlayAction = nullptr;
@@ -115,12 +145,25 @@ namespace KWin {
         QSet<EffectWindow *> m_pendingUnredirects;
         std::unique_ptr<GLShader> m_shader;
         KSharedConfigPtr m_config;
-        QPointer<QProcess> m_kdialogProcess;
+        QPointer<CalibrationOverlay> m_calibrationOverlay;
+        QHash<EffectWindow *, WindowStatusToast> m_statusToasts;
         bool m_dbusRegistered = false;
         bool m_autoActivateCalibrated = true;
         QString m_calibratingAppKey;
         EffectWindow *m_calibratingWindow = nullptr;
+        CalibrationSettings m_calibrationBaseline;
+        CalibrationSettings m_calibrationDraft;
+        bool m_calibrationDraftActive = false;
+        bool m_warnedOverlayHdrPresentation = false;
+        bool m_warnedOverlayBlur = false;
         QMetaObject::Connection m_windowDeletedConnection;
+        QMetaObject::Connection m_frameGeometryConnection;
+        QList<QMetaObject::Connection> m_outputHdrConnections;
+        QHash<EffectWindow *, QMetaObject::Connection> m_windowOutputConnections;
+        QList<QMetaObject::Connection> m_screenListConnections;
+        bool m_outputTrackingConnected = false;
+        LogicalOutput *m_currentPaintOutput = nullptr;
+        bool m_paintingCompositorMargin = false;
 
         CalibrationSettings m_globalDefaults;
         float m_hdrReferenceNits = 100.0f;

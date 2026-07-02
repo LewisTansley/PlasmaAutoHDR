@@ -4,7 +4,7 @@
 */
 
 #include "autohdr_config.h"
-#include "tone_curve_editor.h"
+#include "ui/tone_curve_editor.h"
 
 #include <KConfigGroup>
 #include <KCModule>

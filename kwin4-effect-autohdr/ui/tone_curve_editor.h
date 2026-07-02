@@ -39,6 +39,9 @@ public:
     float blackPoint() const;
     void setBlackPoint(float blackPoint);
 
+    void setOverlayMode(bool overlayMode);
+    void setOverlayLuminanceFactor(float factor);
+
 Q_SIGNALS:
     void settingsChanged();
     void settingsCommitted();
@@ -95,6 +98,7 @@ private:
     void handlePlotMouseRelease();
     void handlePlotMouseDoubleClick(const QPointF &plotPos);
     void handlePlotContextMenu(const QPointF &plotPos, const QPoint &globalPos);
+    void applyOverlayStyleSheet();
 
     KSharedConfigPtr m_config;
     QComboBox *m_presetCombo = nullptr;
@@ -126,4 +130,6 @@ private:
     int m_dragIndex = -1;
     int m_selectedIndex = -1;
     bool m_blockSignals = false;
+    bool m_overlayMode = false;
+    float m_overlayLuminanceFactor = 1.0f;
 };
