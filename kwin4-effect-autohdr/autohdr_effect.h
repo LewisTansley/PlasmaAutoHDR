@@ -131,6 +131,7 @@ namespace KWin {
         void computeToneCurveLut(const CalibrationSettings &settings);
         void uploadToneCurveUniforms();
         void warnMissingToneCurveUniformsOnce();
+        void warnMissingPerceptualUniformsOnce();
         void connectOutputTracking();
         void disconnectOutputTracking();
         void rebindOutputHdrConnections();
@@ -149,11 +150,13 @@ namespace KWin {
         QHash<EffectWindow *, WindowStatusToast> m_statusToasts;
         bool m_dbusRegistered = false;
         bool m_autoActivateCalibrated = true;
+        bool m_perceptualColorEnabled = true;
         QString m_calibratingAppKey;
         EffectWindow *m_calibratingWindow = nullptr;
         CalibrationSettings m_calibrationBaseline;
         CalibrationSettings m_calibrationDraft;
         bool m_calibrationDraftActive = false;
+        bool m_calibrationPerceptualBaseline = true;
         bool m_warnedOverlayHdrPresentation = false;
         bool m_warnedOverlayBlur = false;
         QMetaObject::Connection m_windowDeletedConnection;
@@ -171,7 +174,9 @@ namespace KWin {
 
         int m_locGamutExpansion = -1;
         int m_locBlackPoint = -1;
-        int m_locColorVibrance = -1;
+        int m_locColorIntensity = -1;
+        int m_locPqBoostParams = -1;
+        int m_locPerceptualColorEnabled = -1;
         int m_locToneCurveInputSpan = -1;
         int m_locToneCurveLut = -1;
         int m_locDebandStrength = -1;
@@ -181,6 +186,7 @@ namespace KWin {
         int m_locToneCurveSlopeLut = -1;
         int m_locToneCurveMaxSlope = -1;
         int m_locProcessingQuality = -1;
+        int m_locAntiAliasingQuality = -1;
         int m_locEnableSpatialAvgPreCurve = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
@@ -189,17 +195,20 @@ namespace KWin {
         bool m_toneCurveLutDirty = true;
         float m_cachedToneCurveInputSpan = 203.0f;
         bool m_warnedMissingToneCurveUniforms = false;
+        bool m_warnedMissingPerceptualUniforms = false;
 
         mutable GLenum m_redirectInternalFormat = 0;
         int m_processingQuality = 1;
         float m_debandStrength = 0.25f;
         float m_ditherStrength = 0.05f / 255.0f;
-        float m_curveAntialiasStrength = 0.35f;
-        float m_highlightSoftness = 0.25f;
+        float m_curveAntialiasStrength = 0.45f;
+        float m_highlightSoftness = 0.30f;
+        int m_antiAliasingQuality = 0;
 
         QString m_shaderPath;
         QDateTime m_shaderFragMtime;
         QDateTime m_shaderColorMtime;
+        QDateTime m_shaderPerceptualMtime;
     };
 
 } // namespace KWin

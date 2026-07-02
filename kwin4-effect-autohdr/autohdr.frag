@@ -8,8 +8,10 @@ uniform sampler2D sampler;
 uniform vec4 modulation;
 
 uniform float blackPoint;
-uniform float colorVibrance;
+uniform float colorIntensity;
 uniform float gamutExpansion;
+uniform vec4 pqBoostParams;
+uniform int perceptualColorEnabled;
 uniform float toneCurveInputSpan;
 uniform float toneCurveLut[TONE_CURVE_LUT_SIZE];
 uniform float toneCurveSlopeLut[TONE_CURVE_LUT_SIZE];
@@ -19,6 +21,7 @@ uniform float ditherStrength;
 uniform float curveAntialiasStrength;
 uniform float highlightSoftness;
 uniform int processingQuality;
+uniform int antiAliasingQuality;
 uniform int enableSpatialAvgPreCurve;
 uniform int textureWidth;
 uniform int textureHeight;
@@ -27,6 +30,7 @@ in vec2 texcoord0;
 out vec4 fragColor;
 
 #include "autohdr_color.glsl"
+#include "autohdr_perceptual.glsl"
 
 float mapToneCurve(float inputNits, float inputSpan)
 {
@@ -44,20 +48,6 @@ float mapToneCurve(float inputNits, float inputSpan)
     float t3 = t2 * t;
     return (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * m0
          + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * m1;
-}
-
-vec3 applyColorControls(vec3 rgb, float sat, float vib)
-{
-    float luma = dot(rgb, AUTOHDR_LUMA);
-    float maxVal = max(rgb.r, max(rgb.g, rgb.b));
-    float minVal = min(rgb.r, min(rgb.g, rgb.b));
-    float lnm = maxVal - minVal;
-
-    if (abs(vib) > 0.001) {
-        float amt = vib * (1.0 - lnm);
-        rgb = mix(vec3(luma), rgb, 1.0 + amt);
-    }
-    return mix(vec3(luma), rgb, sat);
 }
 
 vec3 sampleSdrRel(sampler2D tex, vec2 uv, float ref, float sourceWhite)
@@ -82,7 +72,7 @@ vec3 spatialAvgPreCurve(sampler2D tex, vec2 texcoord, vec3 centerRel, float stre
         return centerRel;
     }
 
-    float centerLuma = dot(centerRel, AUTOHDR_LUMA);
+    float centerLuma = luminanceYNits(centerRel * ref) / ref;
     float regionW = regionWeight(centerLuma);
 
     ivec2 px = ivec2(clamp(texcoord * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
@@ -103,7 +93,7 @@ vec3 spatialAvgPreCurve(sampler2D tex, vec2 texcoord, vec3 centerRel, float stre
         }
 
         vec3 neighborRel = sampleSdrRel(tex, nuv, ref, sourceWhite);
-        float inputGrad = abs(dot(neighborRel, AUTOHDR_LUMA) - centerLuma);
+        float inputGrad = abs(luminanceYNits(neighborRel * ref) / ref - centerLuma);
         float flatW = 1.0 - smoothstep(0.001, 0.008, inputGrad);
         float rgbFlat = quantFlatness(neighborRel.r - centerRel.r)
                       * quantFlatness(neighborRel.g - centerRel.g)
@@ -136,35 +126,53 @@ vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, fl
 {
     rgb = reconstructHighlights(rgb, ref);
 
-    float lumaNits = max(dot(rgb, AUTOHDR_LUMA), 1e-6);
-    float t = lumaNits / ref;
-    t = applyUserBlackPoint(t, blackPoint);
-
-    float inputNits = t * ref;
-    float lookupNits = pooledCurveInputNits > 0.0 ? pooledCurveInputNits : inputNits;
+    float rawLumaNits = max(luminanceYNits(rgb), 1e-6);
+    float curveInputNits = applyUserBlackPoint(rawLumaNits / ref, blackPoint) * ref;
+    float lookupNits = pooledCurveInputNits > 0.0 ? pooledCurveInputNits : curveInputNits;
     float outputNits = mapToneCurve(lookupNits, curveSpan);
-    rgb *= outputNits / max(inputNits, 1e-6);
+    float scale = outputNits / max(rawLumaNits, 1e-6);
 
-    if (gamutExpansion > 0.0) {
-        rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+    if (perceptualColorEnabled > 0) {
+        rgb = applyPerceptualLuminanceMap(rgb, rawLumaNits, outputNits, colorIntensity, pqBoostParams);
+
+        if (gamutExpansion > 0.0) {
+            rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+        }
+
+        vec3 xyz = autohdrRec709ToXYZ(rgb);
+        float outY = max(xyz.y, 1e-6);
+        float limitedY = applyHighlightPeakLimit(outY, displayPeak, effectiveHighlightSoftness);
+        rgb = autohdrXyzToRec709(xyz * (limitedY / outY));
+    } else {
+        rgb *= scale;
+
+        if (gamutExpansion > 0.0) {
+            rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
+        }
+
+        float outLuma = dot(rgb, AUTOHDR_LUMA);
+        float limitedLuma = applyHighlightPeakLimit(outLuma, displayPeak, effectiveHighlightSoftness);
+        rgb *= limitedLuma / max(outLuma, 1e-6);
     }
-
-    vec3 sceneMapped = applyColorControls(rgb / ref, 1.0, colorVibrance);
-    rgb = sceneMapped * ref;
-
-    float outLuma = dot(rgb, AUTOHDR_LUMA);
-    float limitedLuma = applyHighlightPeakLimit(outLuma, displayPeak, effectiveHighlightSoftness);
-    rgb *= limitedLuma / max(outLuma, 1e-6);
 
     return rgb;
 }
 
 vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float displayPeak, float sourceWhite, float curveSpan,
-                          float effectiveHighlightSoftness)
+                          float pooledCurveInputNits, float effectiveHighlightSoftness)
 {
     vec4 texSample = texture(tex, uv);
-    return toneMapPipeline(decodeRgbNits(texSample, ref, sourceWhite), ref, displayPeak, curveSpan, 0.0,
-                           effectiveHighlightSoftness);
+    return toneMapPipeline(decodeRgbNits(texSample, ref, sourceWhite), ref, displayPeak, curveSpan,
+                           pooledCurveInputNits, effectiveHighlightSoftness);
+}
+
+void fetchNeighborSample(sampler2D tex, ivec2 px, ivec2 offset, ivec2 texSize, float ref, float sourceWhite,
+                         out vec3 rgbNits, out float alpha)
+{
+    ivec2 npx = clamp(px + offset, ivec2(0), texSize - ivec2(1));
+    vec4 neighborTex = texture(tex, (vec2(npx) + 0.5) / vec2(texSize));
+    alpha = neighborTex.a;
+    rgbNits = decodeRgbNits(neighborTex, ref, sourceWhite);
 }
 
 void main()
@@ -188,93 +196,136 @@ void main()
 
     float spatialAvg = processingQuality > 0 ? debandStrength : 0.0;
     float curveAa = processingQuality > 0 ? curveAntialiasStrength : 0.0;
+    int aaQuality = clamp(antiAliasingQuality, 0, 2);
     ivec2 texSize = ivec2(0);
     if (textureWidth > 0 && textureHeight > 0) {
         texSize = ivec2(textureWidth, textureHeight);
     }
 
-    if (spatialAvg > 0.0 && enableSpatialAvgPreCurve > 0 && texSize.x > 0) {
+    bool enablePreCurve = enableSpatialAvgPreCurve > 0 || curveAa > 0.0;
+    if (spatialAvg > 0.0 && enablePreCurve && texSize.x > 0) {
         vec3 centerRel = rgb / ref;
         centerRel = spatialAvgPreCurve(sampler, texcoord0, centerRel, spatialAvg, texSize, ref, sourceWhite,
                                        centerAlpha);
         rgb = centerRel * ref;
     }
 
-    vec3 neighborInput0 = rgb;
-    vec3 neighborInput1 = rgb;
-    vec3 neighborInput2 = rgb;
-    vec3 neighborInput3 = rgb;
-    float neighborAlpha0 = centerAlpha;
-    float neighborAlpha1 = centerAlpha;
-    float neighborAlpha2 = centerAlpha;
-    float neighborAlpha3 = centerAlpha;
+    vec3 neighborInputs[MAX_AA_NEIGHBORS];
+    float neighborAlphas[MAX_AA_NEIGHBORS];
+    float neighborDistWeights[MAX_AA_NEIGHBORS];
+    for (int i = 0; i < MAX_AA_NEIGHBORS; ++i) {
+        neighborInputs[i] = rgb;
+        neighborAlphas[i] = centerAlpha;
+        neighborDistWeights[i] = 1.0;
+    }
+
+    int postCurveCount = 4;
+    int poolCount = 4;
     float pooledCurveInput = 0.0;
+    float pooledInputs[5];
+    for (int i = 0; i < 5; ++i) {
+        pooledInputs[i] = 0.0;
+    }
 
     if (texSize.x > 0 && (curveAa > 0.0 || spatialAvg > 0.0 || ditherStrength > 0.0)) {
         ivec2 px = ivec2(clamp(texcoord0 * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
 
-        ivec2 npx0 = clamp(px + ivec2(1, 0), ivec2(0), texSize - ivec2(1));
-        vec4 neighborTex0 = texture(sampler, (vec2(npx0) + 0.5) / vec2(texSize));
-        neighborAlpha0 = neighborTex0.a;
-        neighborInput0 = decodeRgbNits(neighborTex0, ref, sourceWhite);
+        const ivec2 cardinalOffsets[4] = ivec2[4](
+            ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)
+        );
+        const ivec2 diagonalOffsets[4] = ivec2[4](
+            ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1)
+        );
+        const ivec2 dist2Offsets[4] = ivec2[4](
+            ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2)
+        );
 
-        ivec2 npx1 = clamp(px + ivec2(-1, 0), ivec2(0), texSize - ivec2(1));
-        vec4 neighborTex1 = texture(sampler, (vec2(npx1) + 0.5) / vec2(texSize));
-        neighborAlpha1 = neighborTex1.a;
-        neighborInput1 = decodeRgbNits(neighborTex1, ref, sourceWhite);
+        for (int i = 0; i < 4; ++i) {
+            fetchNeighborSample(sampler, px, cardinalOffsets[i], texSize, ref, sourceWhite, neighborInputs[i],
+                                neighborAlphas[i]);
+            neighborDistWeights[i] = 1.0;
+        }
 
-        ivec2 npx2 = clamp(px + ivec2(0, 1), ivec2(0), texSize - ivec2(1));
-        vec4 neighborTex2 = texture(sampler, (vec2(npx2) + 0.5) / vec2(texSize));
-        neighborAlpha2 = neighborTex2.a;
-        neighborInput2 = decodeRgbNits(neighborTex2, ref, sourceWhite);
+        if (aaQuality >= 1) {
+            postCurveCount = 8;
+            poolCount = 8;
+            for (int i = 0; i < 4; ++i) {
+                fetchNeighborSample(sampler, px, diagonalOffsets[i], texSize, ref, sourceWhite, neighborInputs[i + 4],
+                                    neighborAlphas[i + 4]);
+                neighborDistWeights[i + 4] = 0.707;
+            }
+        }
 
-        ivec2 npx3 = clamp(px + ivec2(0, -1), ivec2(0), texSize - ivec2(1));
-        vec4 neighborTex3 = texture(sampler, (vec2(npx3) + 0.5) / vec2(texSize));
-        neighborAlpha3 = neighborTex3.a;
-        neighborInput3 = decodeRgbNits(neighborTex3, ref, sourceWhite);
+        if (aaQuality >= 2) {
+            poolCount = 12;
+            for (int i = 0; i < 4; ++i) {
+                fetchNeighborSample(sampler, px, dist2Offsets[i], texSize, ref, sourceWhite, neighborInputs[i + 8],
+                                    neighborAlphas[i + 8]);
+                neighborDistWeights[i + 8] = 0.5;
+            }
+        }
 
         if (curveAa > 0.0) {
-            vec3 neighborInputs[4] = vec3[4](neighborInput0, neighborInput1, neighborInput2, neighborInput3);
-            float neighborAlphas[4] = float[4](neighborAlpha0, neighborAlpha1, neighborAlpha2, neighborAlpha3);
-            pooledCurveInput = poolCurveInputLuma(rgb, neighborInputs, centerAlpha, neighborAlphas, ref, blackPoint,
-                                                  curveAa, curveSpan, toneCurveMaxSlope);
+            vec3 crossNits[5];
+            float crossAlphas[5];
+            crossNits[0] = rgb;
+            crossAlphas[0] = centerAlpha;
+            for (int i = 0; i < 4; ++i) {
+                crossNits[i + 1] = neighborInputs[i];
+                crossAlphas[i + 1] = neighborAlphas[i];
+            }
+
+            if (aaQuality >= 2) {
+                pooledCurveInput = poolCurveInputLuma(rgb, neighborInputs, neighborDistWeights, centerAlpha,
+                                                      neighborAlphas, poolCount, ref, blackPoint, curveAa, curveSpan,
+                                                      toneCurveMaxSlope, aaQuality);
+            } else {
+                pooledCurveInput = poolCurveInputFromCross(crossNits, crossAlphas, 0, ref, blackPoint, curveAa,
+                                                           curveSpan, toneCurveMaxSlope, aaQuality);
+            }
+            for (int i = 0; i < 5; ++i) {
+                pooledInputs[i] = poolCurveInputFromCross(crossNits, crossAlphas, i, ref, blackPoint, curveAa,
+                                                          curveSpan, toneCurveMaxSlope, aaQuality);
+            }
         }
     }
 
     rgb = toneMapPipeline(rgb, ref, displayPeak, curveSpan, pooledCurveInput, effectiveHighlightSoftness);
 
     float localGrad = 0.0;
-    vec3 neighbor0 = rgb;
-    vec3 neighbor1 = rgb;
-    vec3 neighbor2 = rgb;
-    vec3 neighbor3 = rgb;
+    vec3 toneMappedNeighbors[MAX_AA_NEIGHBORS];
+    for (int i = 0; i < MAX_AA_NEIGHBORS; ++i) {
+        toneMappedNeighbors[i] = rgb;
+    }
+
     if ((spatialAvg > 0.0 || ditherStrength > 0.0) && texSize.x > 0) {
-        float centerLuma = dot(rgb / ref, AUTOHDR_LUMA);
+        float centerLuma = luminanceYNits(rgb) / ref;
         float gradAccum = 0.0;
 
-        neighbor0 = toneMapPipeline(neighborInput0, ref, displayPeak, curveSpan, 0.0,
-                                    highlightSoftness * spatialProcessingWeight(neighborAlpha0));
-        gradAccum += abs(dot(neighbor0 / ref, AUTOHDR_LUMA) - centerLuma);
+        for (int i = 0; i < postCurveCount; ++i) {
+            float neighborPooled = 0.0;
+            if (curveAa > 0.0) {
+                if (i < 4) {
+                    neighborPooled = pooledInputs[i + 1];
+                } else {
+                    neighborPooled = poolCurveInputFromSet(neighborInputs[i], neighborAlphas[i], neighborInputs,
+                                                           neighborAlphas, neighborDistWeights, i, postCurveCount,
+                                                           ref, blackPoint, curveAa, curveSpan, toneCurveMaxSlope,
+                                                           aaQuality);
+                }
+            }
+            toneMappedNeighbors[i] =
+                toneMapPipeline(neighborInputs[i], ref, displayPeak, curveSpan, neighborPooled,
+                                highlightSoftness * spatialProcessingWeight(neighborAlphas[i]));
+            gradAccum += abs(luminanceYNits(toneMappedNeighbors[i]) / ref - centerLuma);
+        }
 
-        neighbor1 = toneMapPipeline(neighborInput1, ref, displayPeak, curveSpan, 0.0,
-                                    highlightSoftness * spatialProcessingWeight(neighborAlpha1));
-        gradAccum += abs(dot(neighbor1 / ref, AUTOHDR_LUMA) - centerLuma);
-
-        neighbor2 = toneMapPipeline(neighborInput2, ref, displayPeak, curveSpan, 0.0,
-                                    highlightSoftness * spatialProcessingWeight(neighborAlpha2));
-        gradAccum += abs(dot(neighbor2 / ref, AUTOHDR_LUMA) - centerLuma);
-
-        neighbor3 = toneMapPipeline(neighborInput3, ref, displayPeak, curveSpan, 0.0,
-                                    highlightSoftness * spatialProcessingWeight(neighborAlpha3));
-        gradAccum += abs(dot(neighbor3 / ref, AUTOHDR_LUMA) - centerLuma);
-
-        localGrad = gradAccum * 0.25;
+        localGrad = gradAccum / float(postCurveCount);
     }
 
     if (spatialAvg > 0.0) {
-        float neighborAlphas[4] = float[4](neighborAlpha0, neighborAlpha1, neighborAlpha2, neighborAlpha3);
-        rgb = spatialAvgPostCurve(rgb, neighbor0, neighbor1, neighbor2, neighbor3, centerAlpha, neighborAlphas,
-                                  spatialAvg, ref, localGrad, curveAa);
+        rgb = spatialAvgPostCurve(rgb, toneMappedNeighbors, neighborDistWeights, centerAlpha, neighborAlphas,
+                                  postCurveCount, spatialAvg, ref, localGrad, curveAa, aaQuality);
     }
 
     rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad, spatialAvg);

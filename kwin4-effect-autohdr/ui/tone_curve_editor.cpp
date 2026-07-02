@@ -57,6 +57,42 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     presetLayout->addWidget(m_deletePresetBtn);
     layout->addLayout(presetLayout);
 
+    m_savePresetRow = new QWidget(this);
+    auto *saveRowLayout = new QHBoxLayout(m_savePresetRow);
+    saveRowLayout->setContentsMargins(0, 0, 0, 0);
+    saveRowLayout->addWidget(new QLabel(tr("Preset name:"), m_savePresetRow));
+    m_savePresetNameEdit = new QLineEdit(m_savePresetRow);
+    m_savePresetNameEdit->setClearButtonEnabled(true);
+    saveRowLayout->addWidget(m_savePresetNameEdit, 1);
+    m_savePresetConfirmBtn = new QPushButton(tr("Save"), m_savePresetRow);
+    m_savePresetCancelBtn = new QPushButton(tr("Cancel"), m_savePresetRow);
+    saveRowLayout->addWidget(m_savePresetConfirmBtn);
+    saveRowLayout->addWidget(m_savePresetCancelBtn);
+    m_savePresetRow->setVisible(false);
+    layout->addWidget(m_savePresetRow);
+
+    m_deletePresetRow = new QWidget(this);
+    auto *deleteRowLayout = new QHBoxLayout(m_deletePresetRow);
+    deleteRowLayout->setContentsMargins(0, 0, 0, 0);
+    m_deletePresetLabel = new QLabel(m_deletePresetRow);
+    deleteRowLayout->addWidget(m_deletePresetLabel, 1);
+    m_deletePresetConfirmBtn = new QPushButton(tr("Delete"), m_deletePresetRow);
+    m_deletePresetCancelBtn = new QPushButton(tr("Cancel"), m_deletePresetRow);
+    deleteRowLayout->addWidget(m_deletePresetConfirmBtn);
+    deleteRowLayout->addWidget(m_deletePresetCancelBtn);
+    m_deletePresetRow->setVisible(false);
+    layout->addWidget(m_deletePresetRow);
+
+    const auto installPromptEscFilter = [this](QWidget *widget) {
+        widget->installEventFilter(this);
+    };
+    installPromptEscFilter(m_savePresetNameEdit);
+    installPromptEscFilter(m_savePresetConfirmBtn);
+    installPromptEscFilter(m_savePresetCancelBtn);
+    installPromptEscFilter(m_deletePresetLabel);
+    installPromptEscFilter(m_deletePresetConfirmBtn);
+    installPromptEscFilter(m_deletePresetCancelBtn);
+
     auto *bodyLayout = new QHBoxLayout();
     bodyLayout->setSpacing(16);
     m_plotHost = new QWidget(this);
@@ -81,9 +117,13 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     m_blackPoint->setSingleStep(0.0001);
     m_blackPoint->setToolTip(tr("Fine-tune shadow black point. "
                                  "Leave at 0 for most content."));
-    m_vibrance = new QDoubleSpinBox(this);
-    m_vibrance->setRange(0.0, 10.0);
-    m_vibrance->setSingleStep(0.1);
+    m_colorIntensity = new QDoubleSpinBox(this);
+    m_colorIntensity->setRange(0.0, 100.0);
+    m_colorIntensity->setSuffix(QStringLiteral(" %"));
+    m_colorIntensity->setDecimals(0);
+    m_colorIntensity->setSingleStep(5.0);
+    m_colorIntensity->setToolTip(tr("0% = PQ boost on photometric Y only; 100% = PQ boost on all XYZ channels. "
+                                    "Only applies when perceptual color is enabled."));
     m_gamutExpansion = new QDoubleSpinBox(this);
     m_gamutExpansion->setRange(0.0, 20.0);
     m_gamutExpansion->setSingleStep(0.1);
@@ -94,7 +134,7 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     controlsLayout->addRow(tr("Peak nits:"), m_peakNits);
     controlsLayout->addRow(tr("Reference nits:"), m_referenceNits);
     controlsLayout->addRow(tr("Shadow offset:"), m_blackPoint);
-    controlsLayout->addRow(tr("Vibrance:"), m_vibrance);
+    controlsLayout->addRow(tr("Color intensity:"), m_colorIntensity);
     controlsLayout->addRow(tr("Gamut expansion boost:"), m_gamutExpansion);
     controlsLayout->addRow(m_inputLabel);
     controlsLayout->addRow(m_outputLabel);
@@ -140,14 +180,15 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
         Q_EMIT settingsChanged();
     });
     connect(m_blackPoint, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
-    connect(m_vibrance, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
+    connect(m_colorIntensity, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
         if (m_blockSignals) {
             return;
         }
-        m_vibranceValue = AutoHdr::clampVibrance(static_cast<float>(m_vibrance->value()));
+        m_colorIntensityValue =
+            AutoHdr::clampColorIntensity(static_cast<float>(m_colorIntensity->value() / 100.0));
         Q_EMIT settingsChanged();
     });
-    connect(m_vibrance, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
+    connect(m_colorIntensity, &QDoubleSpinBox::editingFinished, this, [this]() { emitChanged(true); });
     connect(m_gamutExpansion, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() {
         if (m_blockSignals) {
             return;
@@ -173,6 +214,21 @@ ToneCurveEditor::ToneCurveEditor(QWidget *parent)
     connect(m_savePresetBtn, &QPushButton::clicked, this, [this]() { saveUserPreset(); });
     connect(m_updatePresetBtn, &QPushButton::clicked, this, [this]() { updateUserPreset(); });
     connect(m_deletePresetBtn, &QPushButton::clicked, this, [this]() { deleteUserPreset(); });
+    connect(m_savePresetConfirmBtn, &QPushButton::clicked, this, [this]() {
+        const QString name = m_savePresetNameEdit->text().trimmed();
+        if (name.isEmpty()) {
+            return;
+        }
+        commitUserPresetSave(name);
+        hideSavePresetPrompt();
+    });
+    connect(m_savePresetCancelBtn, &QPushButton::clicked, this, [this]() { hideSavePresetPrompt(); });
+    connect(m_savePresetNameEdit, &QLineEdit::returnPressed, m_savePresetConfirmBtn, &QPushButton::click);
+    connect(m_deletePresetConfirmBtn, &QPushButton::clicked, this, [this]() {
+        performUserPresetDelete();
+        hideDeletePresetPrompt();
+    });
+    connect(m_deletePresetCancelBtn, &QPushButton::clicked, this, [this]() { hideDeletePresetPrompt(); });
 
     rebuildPresetCombo();
     updatePresetActionButtons();
@@ -195,8 +251,8 @@ void ToneCurveEditor::setHdrLimits(int minPeakNits, int maxDisplayNits)
 
 void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPointF &sdrMaxPoint,
                                 const QVector<QPointF> &intermediatePoints, float blackPoint,
-                                AutoHdr::ToneCurvePreset preset, const QString &userPresetId, float vibrance,
-                                float gamutExpansion)
+                                AutoHdr::ToneCurvePreset preset, const QString &userPresetId,
+                                float gamutExpansion, float colorIntensity)
 {
     m_blockSignals = true;
     m_peakNitsValue = peakNits;
@@ -204,7 +260,7 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
     m_sdrMaxPoint = sdrMaxPoint;
     m_intermediatePoints = intermediatePoints;
     m_blackPointValue = AutoHdr::clampBlackPoint(blackPoint);
-    m_vibranceValue = AutoHdr::clampVibrance(vibrance);
+    m_colorIntensityValue = AutoHdr::clampColorIntensity(colorIntensity);
     m_gamutExpansionValue = AutoHdr::clampGamutExpansion(gamutExpansion);
     m_preset = preset;
     m_userPresetId = userPresetId;
@@ -212,7 +268,7 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
     m_peakNits->setValue(qRound(peakNits));
     m_referenceNits->setValue(qRound(referenceNits));
     m_blackPoint->setValue(m_blackPointValue);
-    m_vibrance->setValue(m_vibranceValue);
+    m_colorIntensity->setValue(m_colorIntensityValue * 100.0);
     m_gamutExpansion->setValue(m_gamutExpansionValue);
     enforcePeakFloor();
     sanitizePoints();
@@ -225,8 +281,8 @@ void ToneCurveEditor::setValues(float peakNits, float referenceNits, const QPoin
 
 void ToneCurveEditor::getValues(float &peakNits, float &referenceNits, QPointF &sdrMaxPoint,
                                 QVector<QPointF> &intermediatePoints, float &blackPoint,
-                                AutoHdr::ToneCurvePreset &preset, QString &userPresetId, float &vibrance,
-                                float &gamutExpansion)
+                                AutoHdr::ToneCurvePreset &preset, QString &userPresetId,
+                                float &gamutExpansion, float &colorIntensity)
 {
     flushSpinValuesFromUi();
     peakNits = m_peakNitsValue;
@@ -236,9 +292,10 @@ void ToneCurveEditor::getValues(float &peakNits, float &referenceNits, QPointF &
     m_blackPoint->interpretText();
     m_blackPointValue = AutoHdr::clampBlackPoint(static_cast<float>(m_blackPoint->value()));
     blackPoint = m_blackPointValue;
-    m_vibrance->interpretText();
-    m_vibranceValue = AutoHdr::clampVibrance(static_cast<float>(m_vibrance->value()));
-    vibrance = m_vibranceValue;
+    m_colorIntensity->interpretText();
+    m_colorIntensityValue =
+        AutoHdr::clampColorIntensity(static_cast<float>(m_colorIntensity->value() / 100.0));
+    colorIntensity = m_colorIntensityValue;
     m_gamutExpansion->interpretText();
     m_gamutExpansionValue = AutoHdr::clampGamutExpansion(static_cast<float>(m_gamutExpansion->value()));
     gamutExpansion = m_gamutExpansionValue;
@@ -301,12 +358,24 @@ void ToneCurveEditor::setOverlayLuminanceFactor(float factor)
     }
 }
 
+bool ToneCurveEditor::isPresetPromptOpen() const
+{
+    return (m_savePresetRow && m_savePresetRow->isVisible())
+        || (m_deletePresetRow && m_deletePresetRow->isVisible());
+}
+
+void ToneCurveEditor::notifyLayoutChanged()
+{
+    updateGeometry();
+    Q_EMIT layoutChanged();
+}
+
 void ToneCurveEditor::applyOverlayStyleSheet()
 {
     setStyleSheet(QStringLiteral(
         "ToneCurveEditor { background: transparent; }"
         "QLabel { color: #ffffff; background: transparent; }"
-        "QComboBox, QSpinBox, QDoubleSpinBox, QPushButton {"
+        "QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QLineEdit {"
         "  background: rgba(40, 40, 40, 220);"
         "  color: #ffffff;"
         "  border: 1px solid rgba(255, 255, 255, 90);"
@@ -571,25 +640,71 @@ void ToneCurveEditor::setPresetFromComboId(const QString &comboId, bool applyCur
 
 void ToneCurveEditor::updatePresetActionButtons()
 {
+    const bool promptOpen = isPresetPromptOpen();
     const bool hasConfig = static_cast<bool>(m_config);
     const bool userActive = m_preset == AutoHdr::ToneCurvePreset::User && !m_userPresetId.isEmpty();
-    m_savePresetBtn->setEnabled(hasConfig);
-    m_updatePresetBtn->setEnabled(hasConfig && userActive);
-    m_deletePresetBtn->setEnabled(hasConfig && userActive);
+    m_savePresetBtn->setEnabled(hasConfig && !promptOpen);
+    m_updatePresetBtn->setEnabled(hasConfig && userActive && !promptOpen);
+    m_deletePresetBtn->setEnabled(hasConfig && userActive && !promptOpen);
+    m_presetCombo->setEnabled(!promptOpen);
 }
 
-void ToneCurveEditor::saveUserPreset()
+void ToneCurveEditor::showSavePresetPrompt()
 {
-    if (!m_config) {
+    hideAllPresetPrompts();
+    m_savePresetNameEdit->clear();
+    m_savePresetRow->setVisible(true);
+    updatePresetActionButtons();
+    notifyLayoutChanged();
+    m_savePresetNameEdit->setFocus();
+}
+
+void ToneCurveEditor::hideSavePresetPrompt()
+{
+    if (!m_savePresetRow->isVisible()) {
         return;
     }
+    m_savePresetRow->setVisible(false);
+    updatePresetActionButtons();
+    notifyLayoutChanged();
+}
 
-    flushSpinValuesFromUi();
-    bool ok = false;
-    const QString name =
-        QInputDialog::getText(this, tr("Save Tone Curve Preset"), tr("Preset name:"), QLineEdit::Normal, QString(), &ok)
-            .trimmed();
-    if (!ok || name.isEmpty()) {
+void ToneCurveEditor::showDeletePresetPrompt()
+{
+    if (m_userPresetId.isEmpty()) {
+        return;
+    }
+    hideAllPresetPrompts();
+    m_deletePresetLabel->setText(tr("Delete preset \"%1\"?").arg(m_userPresetId));
+    m_deletePresetRow->setVisible(true);
+    updatePresetActionButtons();
+    notifyLayoutChanged();
+    m_deletePresetConfirmBtn->setFocus();
+}
+
+void ToneCurveEditor::hideDeletePresetPrompt()
+{
+    if (!m_deletePresetRow->isVisible()) {
+        return;
+    }
+    m_deletePresetRow->setVisible(false);
+    updatePresetActionButtons();
+    notifyLayoutChanged();
+}
+
+void ToneCurveEditor::hideAllPresetPrompts()
+{
+    if (m_savePresetRow) {
+        m_savePresetRow->setVisible(false);
+    }
+    if (m_deletePresetRow) {
+        m_deletePresetRow->setVisible(false);
+    }
+}
+
+void ToneCurveEditor::commitUserPresetSave(const QString &name)
+{
+    if (!m_config || name.isEmpty()) {
         return;
     }
 
@@ -608,6 +723,46 @@ void ToneCurveEditor::saveUserPreset()
     update();
     Q_EMIT settingsChanged();
     Q_EMIT settingsCommitted();
+}
+
+void ToneCurveEditor::performUserPresetDelete()
+{
+    if (!m_config || m_preset != AutoHdr::ToneCurvePreset::User || m_userPresetId.isEmpty()) {
+        return;
+    }
+
+    AutoHdr::deleteUserToneCurvePreset(m_config, m_userPresetId);
+    m_preset = AutoHdr::ToneCurvePreset::Custom;
+    m_userPresetId.clear();
+    rebuildPresetCombo();
+    syncPresetCombo();
+    updatePresetActionButtons();
+    update();
+    Q_EMIT settingsChanged();
+    Q_EMIT settingsCommitted();
+}
+
+void ToneCurveEditor::saveUserPreset()
+{
+    if (!m_config) {
+        return;
+    }
+
+    flushSpinValuesFromUi();
+    if (m_overlayMode) {
+        showSavePresetPrompt();
+        return;
+    }
+
+    bool ok = false;
+    const QString name =
+        QInputDialog::getText(this, tr("Save Tone Curve Preset"), tr("Preset name:"), QLineEdit::Normal, QString(), &ok)
+            .trimmed();
+    if (!ok || name.isEmpty()) {
+        return;
+    }
+
+    commitUserPresetSave(name);
 }
 
 void ToneCurveEditor::updateUserPreset()
@@ -636,21 +791,18 @@ void ToneCurveEditor::deleteUserPreset()
         return;
     }
 
+    if (m_overlayMode) {
+        showDeletePresetPrompt();
+        return;
+    }
+
     const auto answer = QMessageBox::question(this, tr("Delete Tone Curve Preset"),
                                               tr("Delete preset \"%1\"?").arg(m_userPresetId));
     if (answer != QMessageBox::Yes) {
         return;
     }
 
-    AutoHdr::deleteUserToneCurvePreset(m_config, m_userPresetId);
-    m_preset = AutoHdr::ToneCurvePreset::Custom;
-    m_userPresetId.clear();
-    rebuildPresetCombo();
-    syncPresetCombo();
-    updatePresetActionButtons();
-    update();
-    Q_EMIT settingsChanged();
-    Q_EMIT settingsCommitted();
+    performUserPresetDelete();
 }
 
 void ToneCurveEditor::emitChanged(bool committed)
@@ -792,6 +944,23 @@ void ToneCurveEditor::paintEvent(QPaintEvent *event)
 
 bool ToneCurveEditor::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::KeyPress) {
+        const auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_Escape) {
+            auto *widget = qobject_cast<QWidget *>(watched);
+            if (widget && m_savePresetRow && m_savePresetRow->isVisible()
+                && (widget == m_savePresetRow || m_savePresetRow->isAncestorOf(widget))) {
+                hideSavePresetPrompt();
+                return true;
+            }
+            if (widget && m_deletePresetRow && m_deletePresetRow->isVisible()
+                && (widget == m_deletePresetRow || m_deletePresetRow->isAncestorOf(widget))) {
+                hideDeletePresetPrompt();
+                return true;
+            }
+        }
+    }
+
     if (watched != m_plotHost) {
         return QWidget::eventFilter(watched, event);
     }
@@ -944,6 +1113,21 @@ void ToneCurveEditor::handlePlotContextMenu(const QPointF &pos, const QPoint &gl
 
 void ToneCurveEditor::keyPressEvent(QKeyEvent *event)
 {
+    if (m_savePresetRow && m_savePresetRow->isVisible()) {
+        if (event->key() == Qt::Key_Escape) {
+            hideSavePresetPrompt();
+            event->accept();
+            return;
+        }
+    }
+    if (m_deletePresetRow && m_deletePresetRow->isVisible()) {
+        if (event->key() == Qt::Key_Escape) {
+            hideDeletePresetPrompt();
+            event->accept();
+            return;
+        }
+    }
+
     if (event->key() != Qt::Key_Delete && event->key() != Qt::Key_Backspace) {
         QWidget::keyPressEvent(event);
         return;

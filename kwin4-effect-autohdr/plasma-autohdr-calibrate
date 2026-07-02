@@ -19,7 +19,7 @@ CONFIG_KEYS = (
     "MaxNits",
     "GamutExpansion",
     "BlackPoint",
-    "Vibrance",
+    "ColorIntensity",
     "ReferenceNits",
     "SdrMaxPoint",
     "ToneCurvePoints",
@@ -39,7 +39,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "MaxNits": 1000.0,
     "GamutExpansion": 1.5,
     "BlackPoint": 0.0,
-    "Vibrance": 0.0,
+    "ColorIntensity": 0.33,
     "ReferenceNits": 203.0,
     "SdrMaxPoint": "",
     "ToneCurvePoints": "",
@@ -289,8 +289,8 @@ def sanitize_settings(settings: dict[str, object], reference: int, max_nits: int
     result["MaxNits"] = clamp_curve_peak(float(result["MaxNits"]), ref, max_nits)
     if float(result["GamutExpansion"]) < 0.0 or float(result["GamutExpansion"]) > 20.0:
         result["GamutExpansion"] = 1.5
-    result["Vibrance"] = clamp_vibrance(float(result["Vibrance"]))
     result["GamutExpansion"] = clamp_gamut_expansion(float(result["GamutExpansion"]))
+    result["ColorIntensity"] = clamp_color_intensity(float(result.get("ColorIntensity", 0.33)))
     result["BlackPoint"] = clamp_black(float(result["BlackPoint"]))
     peak = float(result["MaxNits"])
     preset = preset_from_string(str(result.get("ToneCurvePreset", "custom")))
@@ -471,12 +471,12 @@ def clamp_black(value: float) -> float:
     return max(-0.01, min(0.01, value))
 
 
-def clamp_vibrance(value: float) -> float:
-    return max(0.0, min(10.0, value))
-
-
 def clamp_gamut_expansion(value: float) -> float:
     return max(0.0, min(20.0, value))
+
+
+def clamp_color_intensity(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def clamp_reference_nits(value: float) -> float:
@@ -1080,9 +1080,11 @@ def settings_from_curve(
     updated["ToneCurvePreset"] = preset_to_string(str(curve_values.get("ToneCurvePreset", PRESET_CUSTOM)))
     updated["ToneCurveUserPresetId"] = str(curve_values.get("ToneCurveUserPresetId", "")).strip()
     updated["BlackPoint"] = clamp_black(float(curve_values.get("BlackPoint", updated.get("BlackPoint", 0.0))))
-    updated["Vibrance"] = clamp_vibrance(float(curve_values.get("Vibrance", updated.get("Vibrance", 0.0))))
     updated["GamutExpansion"] = clamp_gamut_expansion(
         float(curve_values.get("GamutExpansion", updated.get("GamutExpansion", 1.5)))
+    )
+    updated["ColorIntensity"] = clamp_color_intensity(
+        float(curve_values.get("ColorIntensity", updated.get("ColorIntensity", 0.33)))
     )
     return sanitize_settings(updated, reference, max_nits)
 
@@ -1197,7 +1199,7 @@ def run_qt_form(
             self.intermediate_points = parse_tone_curve_points(str(initial_settings.get("ToneCurvePoints", "")))
             self.tone_curve_preset = preset_to_string(str(initial_settings.get("ToneCurvePreset", PRESET_LINEAR)))
             self.tone_curve_user_preset_id = str(initial_settings.get("ToneCurveUserPresetId", "")).strip()
-            self.vibrance_value = float(initial_settings.get("Vibrance", 0.0))
+            self.color_intensity_value = clamp_color_intensity(float(initial_settings.get("ColorIntensity", 0.33)))
             self.gamut_value = float(initial_settings.get("GamutExpansion", 1.5))
             self.black_point_value = clamp_black(float(initial_settings.get("BlackPoint", 0.0)))
             self._cfg_path = config_path()
@@ -1241,9 +1243,15 @@ def run_qt_form(
                 "Fine-tune shadow black point. "
                 "Leave at 0 for most content."
             )
-            self.vibrance_spin = QDoubleSpinBox(self)
-            self.vibrance_spin.setRange(0.0, 10.0)
-            self.vibrance_spin.setSingleStep(0.1)
+            self.color_intensity_spin = QDoubleSpinBox(self)
+            self.color_intensity_spin.setRange(0.0, 100.0)
+            self.color_intensity_spin.setSuffix(" %")
+            self.color_intensity_spin.setDecimals(0)
+            self.color_intensity_spin.setSingleStep(5.0)
+            self.color_intensity_spin.setToolTip(
+                "0% = PQ boost on photometric Y only; 100% = PQ boost on all XYZ channels. "
+                "Only applies when perceptual color is enabled."
+            )
             self.gamut_spin = QDoubleSpinBox(self)
             self.gamut_spin.setRange(0.0, 20.0)
             self.gamut_spin.setSingleStep(0.1)
@@ -1256,7 +1264,7 @@ def run_qt_form(
             controls.addRow("Peak nits:", self.peak_spin)
             controls.addRow("Reference nits:", self.reference_spin)
             controls.addRow("Shadow offset:", self.black_point_spin)
-            controls.addRow("Vibrance:", self.vibrance_spin)
+            controls.addRow("Color intensity:", self.color_intensity_spin)
             controls.addRow("Gamut expansion boost:", self.gamut_spin)
             controls.addRow(self.input_label)
             controls.addRow(self.output_label)
@@ -1272,8 +1280,8 @@ def run_qt_form(
             self.reference_spin.editingFinished.connect(self._emit_committed)
             self.black_point_spin.valueChanged.connect(self._on_black_point_changed)
             self.black_point_spin.editingFinished.connect(self._emit_committed)
-            self.vibrance_spin.valueChanged.connect(self._on_vibrance_changed)
-            self.vibrance_spin.editingFinished.connect(self._emit_committed)
+            self.color_intensity_spin.valueChanged.connect(self._on_color_intensity_changed)
+            self.color_intensity_spin.editingFinished.connect(self._emit_committed)
             self.gamut_spin.valueChanged.connect(self._on_gamut_changed)
             self.gamut_spin.editingFinished.connect(self._emit_committed)
             self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
@@ -1475,7 +1483,7 @@ def run_qt_form(
             self.peak_spin.setValue(int(round(self.peak_nits)))
             self.reference_spin.setValue(int(round(self.reference_nits)))
             self.black_point_spin.setValue(self.black_point_value)
-            self.vibrance_spin.setValue(self.vibrance_value)
+            self.color_intensity_spin.setValue(self.color_intensity_value * 100.0)
             self.gamut_spin.setValue(self.gamut_value)
             self._enforce_peak_floor()
             self._sanitize_curve_points()
@@ -1489,7 +1497,7 @@ def run_qt_form(
             self.peak_nits = float(self.peak_spin.value())
             self.reference_nits = clamp_reference_nits(float(self.reference_spin.value()))
             self.black_point_value = clamp_black(float(self.black_point_spin.value()))
-            self.vibrance_value = clamp_vibrance(float(self.vibrance_spin.value()))
+            self.color_intensity_value = clamp_color_intensity(float(self.color_intensity_spin.value()) / 100.0)
             self.gamut_value = clamp_gamut_expansion(float(self.gamut_spin.value()))
 
         def _plot_host_rect(self) -> QRectF:
@@ -1564,9 +1572,9 @@ def run_qt_form(
             elif sender is self.black_point_spin:
                 self.black_point_spin.interpretText()
                 self._on_black_point_changed()
-            elif sender is self.vibrance_spin:
-                self.vibrance_spin.interpretText()
-                self._on_vibrance_changed()
+            elif sender is self.color_intensity_spin:
+                self.color_intensity_spin.interpretText()
+                self._on_color_intensity_changed()
             elif sender is self.gamut_spin:
                 self.gamut_spin.interpretText()
                 self._on_gamut_changed()
@@ -1581,10 +1589,10 @@ def run_qt_form(
                 return
             self.black_point_value = clamp_black(float(self.black_point_spin.value()))
 
-        def _on_vibrance_changed(self) -> None:
+        def _on_color_intensity_changed(self) -> None:
             if self._block:
                 return
-            self.vibrance_value = clamp_vibrance(float(self.vibrance_spin.value()))
+            self.color_intensity_value = clamp_color_intensity(float(self.color_intensity_spin.value()) / 100.0)
 
         def _on_gamut_changed(self) -> None:
             if self._block:
@@ -1625,7 +1633,7 @@ def run_qt_form(
                 "ToneCurvePreset": self.tone_curve_preset,
                 "ToneCurveUserPresetId": self.tone_curve_user_preset_id,
                 "BlackPoint": float(self.black_point_value),
-                "Vibrance": float(self.vibrance_value),
+                "ColorIntensity": float(self.color_intensity_value),
                 "GamutExpansion": float(self.gamut_value),
             }
 
@@ -1875,7 +1883,6 @@ def run_qt_form(
             self.tone_curve.peak_spin.interpretText()
             self.tone_curve.reference_spin.interpretText()
             self.tone_curve.black_point_spin.interpretText()
-            self.tone_curve.vibrance_spin.interpretText()
             self.tone_curve.gamut_spin.interpretText()
             if not self.on_commit_curve(self.tone_curve.current_values()):
                 return

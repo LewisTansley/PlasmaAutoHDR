@@ -13,6 +13,7 @@
 class QComboBox;
 class QLabel;
 class QDoubleSpinBox;
+class QLineEdit;
 class QPushButton;
 class QSpinBox;
 
@@ -28,11 +29,11 @@ public:
     void setValues(float peakNits, float referenceNits, const QPointF &sdrMaxPoint,
                    const QVector<QPointF> &intermediatePoints, float blackPoint = 0.0f,
                    AutoHdr::ToneCurvePreset preset = AutoHdr::ToneCurvePreset::Linear,
-                   const QString &userPresetId = QString(), float vibrance = 0.0f,
-                   float gamutExpansion = 1.5f);
+                   const QString &userPresetId = QString(), float gamutExpansion = 1.5f,
+                   float colorIntensity = 0.33f);
     void getValues(float &peakNits, float &referenceNits, QPointF &sdrMaxPoint,
                    QVector<QPointF> &intermediatePoints, float &blackPoint, AutoHdr::ToneCurvePreset &preset,
-                   QString &userPresetId, float &vibrance, float &gamutExpansion);
+                   QString &userPresetId, float &gamutExpansion, float &colorIntensity);
 
     AutoHdr::ToneCurvePreset toneCurvePreset() const;
 
@@ -42,9 +43,12 @@ public:
     void setOverlayMode(bool overlayMode);
     void setOverlayLuminanceFactor(float factor);
 
+    bool isPresetPromptOpen() const;
+
 Q_SIGNALS:
     void settingsChanged();
     void settingsCommitted();
+    void layoutChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -93,6 +97,14 @@ private:
     void saveUserPreset();
     void updateUserPreset();
     void deleteUserPreset();
+    void showSavePresetPrompt();
+    void hideSavePresetPrompt();
+    void showDeletePresetPrompt();
+    void hideDeletePresetPrompt();
+    void hideAllPresetPrompts();
+    void commitUserPresetSave(const QString &name);
+    void performUserPresetDelete();
+    void notifyLayoutChanged();
     void handlePlotMousePress(const QPointF &plotPos, Qt::KeyboardModifiers modifiers);
     void handlePlotMouseMove(const QPointF &plotPos);
     void handlePlotMouseRelease();
@@ -105,11 +117,19 @@ private:
     QPushButton *m_savePresetBtn = nullptr;
     QPushButton *m_updatePresetBtn = nullptr;
     QPushButton *m_deletePresetBtn = nullptr;
+    QWidget *m_savePresetRow = nullptr;
+    QLineEdit *m_savePresetNameEdit = nullptr;
+    QPushButton *m_savePresetConfirmBtn = nullptr;
+    QPushButton *m_savePresetCancelBtn = nullptr;
+    QWidget *m_deletePresetRow = nullptr;
+    QLabel *m_deletePresetLabel = nullptr;
+    QPushButton *m_deletePresetConfirmBtn = nullptr;
+    QPushButton *m_deletePresetCancelBtn = nullptr;
     QWidget *m_plotHost = nullptr;
     QSpinBox *m_peakNits = nullptr;
     QSpinBox *m_referenceNits = nullptr;
     QDoubleSpinBox *m_blackPoint = nullptr;
-    QDoubleSpinBox *m_vibrance = nullptr;
+    QDoubleSpinBox *m_colorIntensity = nullptr;
     QDoubleSpinBox *m_gamutExpansion = nullptr;
     QLabel *m_inputLabel = nullptr;
     QLabel *m_outputLabel = nullptr;
@@ -119,7 +139,7 @@ private:
     float m_peakNitsValue = 1000.0f;
     float m_referenceNitsValue = 203.0f;
     float m_blackPointValue = 0.0f;
-    float m_vibranceValue = 0.0f;
+    float m_colorIntensityValue = 0.33f;
     float m_gamutExpansionValue = 1.5f;
     QPointF m_sdrMaxPoint;
     QVector<QPointF> m_intermediatePoints;

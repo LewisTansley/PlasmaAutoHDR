@@ -112,6 +112,9 @@ namespace KWin {
                 m_highlightSoftness = AutoHdr::clampHighlightSoftness(value);
             }
         }
+        if (qEnvironmentVariableIsSet("AUTOHDR_AA_QUALITY")) {
+            m_antiAliasingQuality = AutoHdr::clampAntiAliasingQuality(qEnvironmentVariableIntValue("AUTOHDR_AA_QUALITY"));
+        }
 
         m_config = AutoHdr::openConfig();
         loadGlobalDefaults();
@@ -359,11 +362,18 @@ namespace KWin {
         m_globalDefaults = AutoHdr::loadGlobalSettings(m_config, m_hdrMaxDisplayNits);
         const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
         m_autoActivateCalibrated = general.autoActivateCalibrated;
+        m_perceptualColorEnabled = general.perceptualColorEnabled;
+        if (qEnvironmentVariableIsSet("AUTOHDR_PERCEPTUAL")) {
+            m_perceptualColorEnabled = qEnvironmentVariableIntValue("AUTOHDR_PERCEPTUAL") != 0;
+        }
         if (!qEnvironmentVariableIsSet("AUTOHDR_CURVE_AA")) {
             m_curveAntialiasStrength = general.curveAntialiasStrength;
         }
         if (!qEnvironmentVariableIsSet("AUTOHDR_HIGHLIGHT_SOFTNESS")) {
             m_highlightSoftness = general.highlightSoftness;
+        }
+        if (!qEnvironmentVariableIsSet("AUTOHDR_AA_QUALITY")) {
+            m_antiAliasingQuality = general.antiAliasingQuality;
         }
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
@@ -404,6 +414,17 @@ namespace KWin {
             qWarning() << "AutoHDR Effect: tone curve shader uniform 'toneCurveInputSpan' not found";
         }
         m_warnedMissingToneCurveUniforms = true;
+    }
+
+    void AutoHDREffect::warnMissingPerceptualUniformsOnce()
+    {
+        if (m_warnedMissingPerceptualUniforms) {
+            return;
+        }
+        if (m_locPerceptualColorEnabled < 0) {
+            qWarning() << "AutoHDR Effect: shader uniform 'perceptualColorEnabled' not found";
+        }
+        m_warnedMissingPerceptualUniforms = true;
     }
 
     void AutoHDREffect::computeToneCurveLut(const CalibrationSettings &settings)
@@ -455,7 +476,9 @@ namespace KWin {
         ShaderBinder binder(m_shader.get());
         m_locGamutExpansion = m_shader->uniformLocation("gamutExpansion");
         m_locBlackPoint = m_shader->uniformLocation("blackPoint");
-        m_locColorVibrance = m_shader->uniformLocation("colorVibrance");
+        m_locColorIntensity = m_shader->uniformLocation("colorIntensity");
+        m_locPqBoostParams = m_shader->uniformLocation("pqBoostParams");
+        m_locPerceptualColorEnabled = m_shader->uniformLocation("perceptualColorEnabled");
         m_locToneCurveInputSpan = m_shader->uniformLocation("toneCurveInputSpan");
         m_locToneCurveLut = m_shader->uniformLocation("toneCurveLut");
         m_locDebandStrength = m_shader->uniformLocation("debandStrength");
@@ -465,8 +488,10 @@ namespace KWin {
         m_locToneCurveSlopeLut = m_shader->uniformLocation("toneCurveSlopeLut");
         m_locToneCurveMaxSlope = m_shader->uniformLocation("toneCurveMaxSlope");
         m_locProcessingQuality = m_shader->uniformLocation("processingQuality");
+        m_locAntiAliasingQuality = m_shader->uniformLocation("antiAliasingQuality");
         m_locEnableSpatialAvgPreCurve = m_shader->uniformLocation("enableSpatialAvgPreCurve");
         warnMissingToneCurveUniformsOnce();
+        warnMissingPerceptualUniformsOnce();
     }
 
     void AutoHDREffect::updateUniforms(const CalibrationSettings &settings)
@@ -487,8 +512,16 @@ namespace KWin {
         if (m_locBlackPoint >= 0) {
             m_shader->setUniform(m_locBlackPoint, sanitized.blackPoint);
         }
-        if (m_locColorVibrance >= 0) {
-            m_shader->setUniform(m_locColorVibrance, sanitized.vibrance);
+        if (m_locColorIntensity >= 0) {
+            m_shader->setUniform(m_locColorIntensity, sanitized.colorIntensity);
+        }
+        if (m_locPqBoostParams >= 0) {
+            const QVector4D pqParams =
+                AutoHdr::computePqBoostParams(sanitized, m_hdrReferenceNits, m_hdrMaxDisplayNits);
+            m_shader->setUniform(m_locPqBoostParams, pqParams);
+        }
+        if (m_locPerceptualColorEnabled >= 0) {
+            m_shader->setUniform(m_locPerceptualColorEnabled, m_perceptualColorEnabled ? 1 : 0);
         }
         if (m_locDebandStrength >= 0) {
             m_shader->setUniform(m_locDebandStrength, m_debandStrength);
@@ -505,8 +538,12 @@ namespace KWin {
         if (m_locProcessingQuality >= 0) {
             m_shader->setUniform(m_locProcessingQuality, m_processingQuality);
         }
+        if (m_locAntiAliasingQuality >= 0) {
+            m_shader->setUniform(m_locAntiAliasingQuality, m_antiAliasingQuality);
+        }
         if (m_locEnableSpatialAvgPreCurve >= 0) {
-            const int enablePreCurve = redirectInternalFormat() == GL_RGBA8 ? 1 : 0;
+            const int enablePreCurve =
+                (redirectInternalFormat() == GL_RGBA8 || m_curveAntialiasStrength > 0.0f) ? 1 : 0;
             m_shader->setUniform(m_locEnableSpatialAvgPreCurve, enablePreCurve);
         }
 
@@ -521,21 +558,34 @@ namespace KWin {
         }
 
         QByteArray source = fragFile.readAll();
-        const QString colorPath = QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl");
-        QFile colorFile(colorPath);
-        if (!colorFile.open(QIODevice::ReadOnly)) {
-            qWarning() << "AutoHDR Effect: color shader module not found at" << colorPath;
+        const QString shaderDir = QFileInfo(m_shaderPath).absolutePath();
+
+        const auto loadInclude = [&](const char *filename) -> QByteArray {
+            QFile includeFile(shaderDir + QLatin1Char('/') + QLatin1String(filename));
+            if (!includeFile.open(QIODevice::ReadOnly)) {
+                qWarning() << "AutoHDR Effect: shader module not found at" << includeFile.fileName();
+                return {};
+            }
+            return includeFile.readAll();
+        };
+
+        const QByteArray colorSource = loadInclude("autohdr_color.glsl");
+        const QByteArray perceptualSource = loadInclude("autohdr_perceptual.glsl");
+        if (colorSource.isEmpty() || perceptualSource.isEmpty()) {
             return {};
         }
 
-        const QByteArray colorSource = colorFile.readAll();
-        const QByteArray includeDirective = QByteArrayLiteral("#include \"autohdr_color.glsl\"");
-        const int includePos = source.indexOf(includeDirective);
-        if (includePos >= 0) {
-            source.replace(includePos, includeDirective.size(), colorSource);
-        } else {
-            source.prepend(colorSource);
-        }
+        const auto replaceInclude = [&](const char *filename, const QByteArray &includeSource) {
+            const QByteArray includeDirective =
+                QByteArrayLiteral("#include \"") + filename + QByteArrayLiteral("\"");
+            const int includePos = source.indexOf(includeDirective);
+            if (includePos >= 0) {
+                source.replace(includePos, includeDirective.size(), includeSource);
+            }
+        };
+
+        replaceInclude("autohdr_color.glsl", colorSource);
+        replaceInclude("autohdr_perceptual.glsl", perceptualSource);
         return source;
     }
 
@@ -543,10 +593,14 @@ namespace KWin {
     {
         if (!m_shaderPath.isEmpty()) {
             const QDateTime fragMtime = QFileInfo(m_shaderPath).lastModified();
-            const QString colorPath = QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl");
-            const QDateTime colorMtime = QFileInfo(colorPath).lastModified();
+            const QString shaderDir = QFileInfo(m_shaderPath).absolutePath();
+            const QDateTime colorMtime =
+                QFileInfo(shaderDir + QStringLiteral("/autohdr_color.glsl")).lastModified();
+            const QDateTime perceptualMtime =
+                QFileInfo(shaderDir + QStringLiteral("/autohdr_perceptual.glsl")).lastModified();
             if (m_shader) {
-                if (fragMtime.isValid() && fragMtime == m_shaderFragMtime && colorMtime == m_shaderColorMtime) {
+                if (fragMtime.isValid() && fragMtime == m_shaderFragMtime && colorMtime == m_shaderColorMtime
+                    && perceptualMtime == m_shaderPerceptualMtime) {
                     return true;
                 }
                 m_shader.reset();
@@ -576,8 +630,10 @@ namespace KWin {
         }
 
         m_shaderFragMtime = QFileInfo(m_shaderPath).lastModified();
-        m_shaderColorMtime =
-            QFileInfo(QFileInfo(m_shaderPath).absolutePath() + QStringLiteral("/autohdr_color.glsl")).lastModified();
+        const QString shaderDir = QFileInfo(m_shaderPath).absolutePath();
+        m_shaderColorMtime = QFileInfo(shaderDir + QStringLiteral("/autohdr_color.glsl")).lastModified();
+        m_shaderPerceptualMtime =
+            QFileInfo(shaderDir + QStringLiteral("/autohdr_perceptual.glsl")).lastModified();
         resolveUniformLocations();
         return true;
     }
@@ -1234,6 +1290,7 @@ namespace KWin {
         m_config->reparseConfiguration();
         loadGlobalDefaults(false);
         reloadActiveWindowSettings();
+        qInfo() << "AutoHDR Effect: perceptual color" << (m_perceptualColorEnabled ? "enabled" : "disabled");
         repaintActiveWindows();
     }
 
@@ -1254,6 +1311,7 @@ namespace KWin {
         }
 
         m_calibrationDraft = m_calibrationOverlay->currentValues();
+        m_perceptualColorEnabled = m_calibrationOverlay->perceptualColorEnabled();
         AutoHdr::sanitizeCalibrationSettings(m_calibrationDraft, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
         m_calibrationDraftActive = true;
 
@@ -1268,6 +1326,7 @@ namespace KWin {
     {
         m_calibrationDraft = m_calibrationBaseline;
         m_calibrationDraftActive = false;
+        m_perceptualColorEnabled = m_calibrationPerceptualBaseline;
         reloadActiveWindowSettings();
         repaintActiveWindows();
     }
@@ -1298,6 +1357,10 @@ namespace KWin {
         profile.settings = m_calibrationOverlay->currentValues();
         AutoHdr::sanitizeCalibrationSettings(profile.settings, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
         AutoHdr::saveAppProfile(m_config, profile);
+
+        AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
+        general.perceptualColorEnabled = m_calibrationOverlay->perceptualColorEnabled();
+        AutoHdr::saveGeneralSettings(m_config, general);
     }
 
     void AutoHDREffect::applyInternalOverlayPresentation(QWidget *overlay)
@@ -1522,6 +1585,7 @@ namespace KWin {
         m_calibrationBaseline = settingsForAppKey(m_calibratingAppKey);
         m_calibrationDraft = m_calibrationBaseline;
         m_calibrationDraftActive = true;
+        m_calibrationPerceptualBaseline = m_perceptualColorEnabled;
 
         auto *overlay = new CalibrationOverlay();
         m_calibrationOverlay = overlay;
@@ -1529,6 +1593,7 @@ namespace KWin {
         overlay->setConfig(m_config);
         overlay->setHdrLimits(qRound(m_hdrReferenceNits) + 1, qRound(m_hdrMaxDisplayNits));
         overlay->setValues(m_calibrationDraft);
+        overlay->setPerceptualColorEnabled(m_perceptualColorEnabled);
 
         connect(overlay, &CalibrationOverlay::settingsChanged, this, &AutoHDREffect::applyCalibrationDraft);
         connect(overlay, &CalibrationOverlay::settingsCommitted, this, &AutoHDREffect::applyCalibrationDraft);

@@ -47,7 +47,7 @@ target_link_libraries(kwin4_effect_autohdr
     KF6::I18n
 )
 
-install(FILES autohdr.frag autohdr_color.glsl
+install(FILES autohdr.frag autohdr_color.glsl autohdr_perceptual.glsl
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr)
 install(PROGRAMS plasma-autohdr-calibrate
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr)

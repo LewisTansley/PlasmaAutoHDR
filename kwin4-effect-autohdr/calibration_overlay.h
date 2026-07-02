@@ -9,6 +9,7 @@
 #include "ui/tone_curve_editor.h"
 
 #include <KSharedConfig>
+#include <QCheckBox>
 #include <QWidget>
 
 class QDialogButtonBox;
@@ -24,6 +25,8 @@ public:
     void setConfig(const KSharedConfigPtr &config);
     void setHdrLimits(int minPeakNits, int maxDisplayNits);
     void setValues(const AutoHdr::CalibrationSettings &settings);
+    void setPerceptualColorEnabled(bool enabled);
+    bool perceptualColorEnabled() const;
     AutoHdr::CalibrationSettings currentValues() const;
     QRect panelBlurRegion() const;
 
@@ -46,5 +49,6 @@ private:
 
     QWidget *m_contentPanel = nullptr;
     ToneCurveEditor *m_editor = nullptr;
+    QCheckBox *m_perceptualColor = nullptr;
     QDialogButtonBox *m_buttons = nullptr;
 };

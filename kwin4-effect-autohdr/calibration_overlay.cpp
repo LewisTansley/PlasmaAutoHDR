@@ -5,6 +5,7 @@
 
 #include "calibration_overlay.h"
 
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QKeyEvent>
 #include <QPainter>
@@ -62,6 +63,12 @@ CalibrationOverlay::CalibrationOverlay(QWidget *parent)
     m_editor->setOverlayLuminanceFactor(0.8f);
     panelLayout->addWidget(m_editor);
 
+    m_perceptualColor = new QCheckBox(tr("Perceptual color (luminance/chroma separation)"), m_contentPanel);
+    m_perceptualColor->setToolTip(
+        tr("Off uses legacy RGB-coupled tone mapping. On applies PQ perceptual remapping in XYZ; "
+           "color intensity blends Y-only vs full-XYZ PQ boost."));
+    panelLayout->addWidget(m_perceptualColor);
+
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, m_contentPanel);
     if (QPushButton *confirm = m_buttons->button(QDialogButtonBox::Ok)) {
         confirm->setText(tr("Confirm"));
@@ -70,6 +77,13 @@ CalibrationOverlay::CalibrationOverlay(QWidget *parent)
 
     connect(m_editor, &ToneCurveEditor::settingsChanged, this, &CalibrationOverlay::settingsChanged);
     connect(m_editor, &ToneCurveEditor::settingsCommitted, this, &CalibrationOverlay::settingsCommitted);
+    connect(m_editor, &ToneCurveEditor::layoutChanged, this, [this]() {
+        if (m_contentPanel) {
+            m_contentPanel->adjustSize();
+            repositionPanel();
+        }
+    });
+    connect(m_perceptualColor, &QCheckBox::toggled, this, &CalibrationOverlay::settingsChanged);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &CalibrationOverlay::onConfirm);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &CalibrationOverlay::onCancel);
 
@@ -88,11 +102,21 @@ void CalibrationOverlay::setHdrLimits(int minPeakNits, int maxDisplayNits)
     m_editor->setOverlayLuminanceFactor(0.8f);
 }
 
+void CalibrationOverlay::setPerceptualColorEnabled(bool enabled)
+{
+    m_perceptualColor->setChecked(enabled);
+}
+
+bool CalibrationOverlay::perceptualColorEnabled() const
+{
+    return m_perceptualColor->isChecked();
+}
+
 void CalibrationOverlay::setValues(const AutoHdr::CalibrationSettings &settings)
 {
     m_editor->setValues(settings.maxNits, settings.referenceNits, settings.sdrMaxPoint, settings.toneCurvePoints,
                         settings.blackPoint, settings.toneCurvePreset, settings.toneCurveUserPresetId,
-                        settings.vibrance, settings.gamutExpansion);
+                        settings.gamutExpansion, settings.colorIntensity);
 }
 
 AutoHdr::CalibrationSettings CalibrationOverlay::currentValues() const
@@ -105,11 +129,11 @@ AutoHdr::CalibrationSettings CalibrationOverlay::currentValues() const
     float blackPoint = 0.0f;
     AutoHdr::ToneCurvePreset preset = AutoHdr::ToneCurvePreset::Linear;
     QString userPresetId;
-    float vibrance = 0.0f;
     float gamutExpansion = 1.5f;
+    float colorIntensity = 0.33f;
 
     m_editor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints, blackPoint, preset, userPresetId,
-                        vibrance, gamutExpansion);
+                        gamutExpansion, colorIntensity);
 
     settings.maxNits = peakNits;
     settings.referenceNits = referenceNits;
@@ -118,8 +142,8 @@ AutoHdr::CalibrationSettings CalibrationOverlay::currentValues() const
     settings.blackPoint = blackPoint;
     settings.toneCurvePreset = preset;
     settings.toneCurveUserPresetId = userPresetId;
-    settings.vibrance = vibrance;
     settings.gamutExpansion = gamutExpansion;
+    settings.colorIntensity = colorIntensity;
     return settings;
 }
 
@@ -145,6 +169,10 @@ void CalibrationOverlay::resizeEvent(QResizeEvent *event)
 
 void CalibrationOverlay::keyPressEvent(QKeyEvent *event)
 {
+    if (m_editor && m_editor->isPresetPromptOpen()) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
     if (event->key() == Qt::Key_Escape) {
         onCancel();
         return;

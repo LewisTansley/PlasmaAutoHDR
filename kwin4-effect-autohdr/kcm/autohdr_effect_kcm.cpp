@@ -13,6 +13,7 @@
 #include <KSharedConfig>
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDoubleSpinBox>
@@ -118,6 +119,15 @@ public:
             i18n("Reduces harsh tone-curve transitions on anti-aliased edges such as text and thin UI lines."));
         smoothingLayout->addRow(i18n("Curve anti-aliasing:"), m_curveAntialias);
 
+        m_antiAliasingQuality = new QComboBox(smoothingGroup);
+        m_antiAliasingQuality->addItem(i18n("Low — 4-neighbor, tuned weights"), 0);
+        m_antiAliasingQuality->addItem(i18n("Medium — 8-neighbor (+4 diagonals)"), 1);
+        m_antiAliasingQuality->addItem(i18n("High — 12-sample wide curve pooling"), 2);
+        m_antiAliasingQuality->setToolTip(
+            i18n("Controls how many neighboring pixels are sampled for curve-domain anti-aliasing. "
+                 "Higher settings improve thin lines and diagonal edges at a small GPU cost."));
+        smoothingLayout->addRow(i18n("Anti-aliasing quality:"), m_antiAliasingQuality);
+
         m_highlightSoftness = new QDoubleSpinBox(smoothingGroup);
         m_highlightSoftness->setRange(0.0, 100.0);
         m_highlightSoftness->setSuffix(QStringLiteral(" %"));
@@ -128,6 +138,14 @@ public:
         smoothingLayout->addRow(i18n("Highlight softness:"), m_highlightSoftness);
 
         layout->addWidget(smoothingGroup);
+
+        m_perceptualColor = new QCheckBox(
+            i18n("Use perceptual luminance/chroma separation"), widget());
+        m_perceptualColor->setToolTip(
+            i18n("Off uses legacy RGB-coupled tone mapping and peak limiting. "
+                 "On applies PQ perceptual remapping in XYZ; color intensity blends "
+                 "Y-only vs full-XYZ PQ boost."));
+        layout->addWidget(m_perceptualColor);
 
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
         layout->addWidget(m_autoActivate);
@@ -148,8 +166,10 @@ public:
         layout->addWidget(appsGroup);
 
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_perceptualColor, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
         connect(m_curveAntialias, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_antiAliasingQuality, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_highlightSoftness, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
     }
@@ -169,11 +189,15 @@ public:
 
         m_toneCurveEditor->setValues(globals.maxNits, globals.referenceNits, globals.sdrMaxPoint,
                                      globals.toneCurvePoints, globals.blackPoint, globals.toneCurvePreset,
-                                     globals.toneCurveUserPresetId, globals.vibrance, globals.gamutExpansion);
+                                     globals.toneCurveUserPresetId, globals.gamutExpansion,
+                                     globals.colorIntensity);
 
         const AutoHdr::GeneralSettings general = AutoHdr::loadGeneralSettings(m_config);
         m_autoActivate->setChecked(general.autoActivateCalibrated);
+        m_perceptualColor->setChecked(general.perceptualColorEnabled);
         m_curveAntialias->setValue(general.curveAntialiasStrength * 100.0);
+        const int aaQualityIndex = m_antiAliasingQuality->findData(general.antiAliasingQuality);
+        m_antiAliasingQuality->setCurrentIndex(aaQualityIndex >= 0 ? aaQualityIndex : 0);
         m_highlightSoftness->setValue(general.highlightSoftness * 100.0);
 
         rebuildAppsTable();
@@ -189,16 +213,16 @@ public:
         float peakNits = 0.0f;
         float referenceNits = 0.0f;
         float blackPoint = 0.0f;
-        float vibrance = 0.0f;
         float gamutExpansion = 1.5f;
+        float colorIntensity = 0.33f;
         QPointF sdrMaxPoint;
         QVector<QPointF> intermediatePoints;
         AutoHdr::ToneCurvePreset toneCurvePreset = AutoHdr::ToneCurvePreset::Linear;
         QString toneCurveUserPresetId;
         m_toneCurveEditor->getValues(peakNits, referenceNits, sdrMaxPoint, intermediatePoints, blackPoint,
-                                     toneCurvePreset, toneCurveUserPresetId, vibrance, gamutExpansion);
-        globals.vibrance = vibrance;
+                                     toneCurvePreset, toneCurveUserPresetId, gamutExpansion, colorIntensity);
         globals.gamutExpansion = gamutExpansion;
+        globals.colorIntensity = colorIntensity;
         globals.maxNits = peakNits;
         globals.referenceNits = referenceNits;
         globals.sdrMaxPoint = sdrMaxPoint;
@@ -213,8 +237,11 @@ public:
 
         AutoHdr::GeneralSettings general;
         general.autoActivateCalibrated = m_autoActivate->isChecked();
+        general.perceptualColorEnabled = m_perceptualColor->isChecked();
         general.curveAntialiasStrength =
             AutoHdr::clampCurveAntialiasStrength(static_cast<float>(m_curveAntialias->value() / 100.0));
+        general.antiAliasingQuality = AutoHdr::clampAntiAliasingQuality(
+            m_antiAliasingQuality->currentData().toInt());
         general.highlightSoftness =
             AutoHdr::clampHighlightSoftness(static_cast<float>(m_highlightSoftness->value() / 100.0));
         AutoHdr::saveGeneralSettings(m_config, general);
@@ -293,7 +320,9 @@ private:
 
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
+    QCheckBox *m_perceptualColor = nullptr;
     QDoubleSpinBox *m_curveAntialias = nullptr;
+    QComboBox *m_antiAliasingQuality = nullptr;
     QDoubleSpinBox *m_highlightSoftness = nullptr;
     ToneCurveEditor *m_toneCurveEditor = nullptr;
     QTableWidget *m_appsTable = nullptr;

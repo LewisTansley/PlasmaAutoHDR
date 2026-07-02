@@ -9,6 +9,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QVector4D>
 #include <optional>
 
 namespace AutoHdr {
@@ -17,7 +18,7 @@ struct CalibrationSettings {
     float maxNits = 1000.0f;
     float gamutExpansion = 1.5f;
     float blackPoint = 0.0f;
-    float vibrance = 0.0f;
+    float colorIntensity = 0.33f;
     float referenceNits = 203.0f;
     QPointF sdrMaxPoint;
     QVector<QPointF> toneCurvePoints;
@@ -30,10 +31,11 @@ constexpr float kReferenceNitsMax = 480.0f;
 
 float clampReferenceNits(float value);
 float clampBlackPoint(float value);
-float clampVibrance(float value);
 float clampGamutExpansion(float value);
+float clampColorIntensity(float value);
 float clampCurveAntialiasStrength(float value);
 float clampHighlightSoftness(float value);
+int clampAntiAliasingQuality(int value);
 
 struct AppProfileMetadata {
     QString key;
@@ -51,8 +53,10 @@ struct AppProfile {
 
 struct GeneralSettings {
     bool autoActivateCalibrated = true;
-    float curveAntialiasStrength = 0.35f;
-    float highlightSoftness = 0.25f;
+    bool perceptualColorEnabled = true;
+    float curveAntialiasStrength = 0.45f;
+    float highlightSoftness = 0.30f;
+    int antiAliasingQuality = 0;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";
@@ -92,5 +96,11 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
 
 ToneCurveEndpoints toneCurveEndpointsFor(const CalibrationSettings &settings, float hdrReferenceNits,
                                          float maxDisplayNits);
+
+QVector4D computePqBoostParams(const CalibrationSettings &settings, float referenceNits, float maxDisplayNits);
+
+float linearToPq(float linearNits, float maxPqValue);
+float pqToLinear(float pqValue, float maxPqValue);
+float computePqMul(float yIn, float yOut, const QVector4D &pqBoostParams);
 
 } // namespace AutoHdr

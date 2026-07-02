@@ -5,6 +5,7 @@
 
 #include <KConfigGroup>
 #include <QRegularExpression>
+#include <cmath>
 
 namespace AutoHdr {
 
@@ -18,14 +19,14 @@ float clampBlackPoint(float value)
     return qBound(-0.01f, value, 0.01f);
 }
 
-float clampVibrance(float value)
-{
-    return qBound(0.0f, value, 10.0f);
-}
-
 float clampGamutExpansion(float value)
 {
     return qBound(0.0f, value, 20.0f);
+}
+
+float clampColorIntensity(float value)
+{
+    return qBound(0.0f, value, 1.0f);
 }
 
 float clampCurveAntialiasStrength(float value)
@@ -36,6 +37,11 @@ float clampCurveAntialiasStrength(float value)
 float clampHighlightSoftness(float value)
 {
     return qBound(0.0f, value, 1.0f);
+}
+
+int clampAntiAliasingQuality(int value)
+{
+    return qBound(0, value, 2);
 }
 
 namespace {
@@ -155,9 +161,11 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     GeneralSettings general;
     const KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     general.autoActivateCalibrated = group.readEntry("AutoActivateCalibrated", true);
+    general.perceptualColorEnabled = group.readEntry("PerceptualColorEnabled", true);
     general.curveAntialiasStrength =
-        clampCurveAntialiasStrength(group.readEntry("CurveAntialiasStrength", 0.35f));
-    general.highlightSoftness = clampHighlightSoftness(group.readEntry("HighlightSoftness", 0.25f));
+        clampCurveAntialiasStrength(group.readEntry("CurveAntialiasStrength", 0.45f));
+    general.highlightSoftness = clampHighlightSoftness(group.readEntry("HighlightSoftness", 0.30f));
+    general.antiAliasingQuality = clampAntiAliasingQuality(group.readEntry("AntiAliasingQuality", 0));
     return general;
 }
 
@@ -165,8 +173,10 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
 {
     KConfigGroup group(config, QString::fromLatin1(groupGeneral));
     group.writeEntry("AutoActivateCalibrated", general.autoActivateCalibrated);
+    group.writeEntry("PerceptualColorEnabled", general.perceptualColorEnabled);
     group.writeEntry("CurveAntialiasStrength", general.curveAntialiasStrength);
     group.writeEntry("HighlightSoftness", general.highlightSoftness);
+    group.writeEntry("AntiAliasingQuality", general.antiAliasingQuality);
     config->sync();
 }
 
@@ -176,7 +186,7 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.maxNits = group.readEntry("MaxNits", defaultMaxNits);
     settings.gamutExpansion = group.readEntry("GamutExpansion", 1.5f);
     settings.blackPoint = group.readEntry("BlackPoint", 0.0f);
-    settings.vibrance = group.readEntry("Vibrance", 0.0f);
+    settings.colorIntensity = group.readEntry("ColorIntensity", 0.33f);
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -215,7 +225,7 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("MaxNits", settings.maxNits);
     group.writeEntry("GamutExpansion", settings.gamutExpansion);
     group.writeEntry("BlackPoint", settings.blackPoint);
-    group.writeEntry("Vibrance", settings.vibrance);
+    group.writeEntry("ColorIntensity", settings.colorIntensity);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -329,7 +339,7 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
 
     const float minPeak = settings.referenceNits + 1.0f;
     settings.maxNits = qBound(minPeak, settings.maxNits, maxDisplayNits);
-    settings.vibrance = clampVibrance(settings.vibrance);
+    settings.colorIntensity = clampColorIntensity(settings.colorIntensity);
     settings.blackPoint = clampBlackPoint(settings.blackPoint);
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
 
@@ -354,6 +364,56 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     endpoints.visualReferenceNits = curveReference;
     settings.toneCurvePoints = sanitizeIntermediatePoints(settings.toneCurvePoints, endpoints);
     settings.sdrMaxPoint = sanitizeSdrMaxPoint(settings.sdrMaxPoint, endpoints, settings.toneCurvePoints);
+}
+
+namespace {
+
+constexpr float kPqN = 2610.0f / 4096.0f / 4.0f;
+constexpr float kPqRcpN = 1.0f / kPqN;
+constexpr float kPqM = 2523.0f / 4096.0f * 128.0f;
+constexpr float kPqRcpM = 1.0f / kPqM;
+constexpr float kPqC1 = 3424.0f / 4096.0f;
+constexpr float kPqC2 = 2413.0f / 4096.0f * 32.0f;
+constexpr float kPqC3 = 2392.0f / 4096.0f * 32.0f;
+
+constexpr float kPqBoost0 = 1.0f;
+constexpr float kPqBoost1 = 0.1f;
+constexpr float kPqBoost3 = 0.5f;
+
+} // namespace
+
+float linearToPq(float linearNits, float maxPqValue)
+{
+    const float normalized = std::pow(qMax(linearNits, 0.0f) / qMax(maxPqValue, 1e-6f), kPqN);
+    const float nd = (kPqC1 + kPqC2 * normalized) / (1.0f + kPqC3 * normalized);
+    return std::pow(nd, kPqM);
+}
+
+float pqToLinear(float pqValue, float maxPqValue)
+{
+    const float pq = std::pow(qMax(pqValue, 0.0f), kPqRcpM);
+    const float nd = qMax(pq - kPqC1, 0.0f) / (kPqC2 - kPqC3 * pq);
+    return std::pow(nd, kPqRcpN) * maxPqValue;
+}
+
+float computePqMul(float yIn, float yOut, const QVector4D &pqBoostParams)
+{
+    const float p0 = pqBoostParams.x();
+    const float p1 = pqBoostParams.y();
+    const float p3 = pqBoostParams.z();
+
+    const float pqIn = linearToPq(yIn, p0);
+    const float pqOut = linearToPq(yOut * p3, p1);
+    return pqOut / qMax(pqIn, 1e-6f);
+}
+
+QVector4D computePqBoostParams(const CalibrationSettings &settings, float referenceNits, float maxDisplayNits)
+{
+    Q_UNUSED(settings)
+    Q_UNUSED(referenceNits)
+    Q_UNUSED(maxDisplayNits)
+
+    return QVector4D(kPqBoost0, kPqBoost1, kPqBoost3, 0.0f);
 }
 
 ToneCurveEndpoints toneCurveEndpointsFor(const CalibrationSettings &settings, float hdrReferenceNits,
