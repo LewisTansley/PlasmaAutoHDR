@@ -147,6 +147,79 @@ public:
                  "Y-only vs full-XYZ PQ boost."));
         layout->addWidget(m_perceptualColor);
 
+        auto *aiGroup = new QGroupBox(i18n("AI-Enhanced HDR"), widget());
+        auto *aiLayout = new QFormLayout(aiGroup);
+
+        m_aiEnhanced = new QCheckBox(i18n("Enable content-aware detail recovery"), aiGroup);
+        m_aiEnhanced->setToolTip(
+            i18n("Uses a low-resolution guidance map (GLSL on AMD/Mesa by default, "
+                 "optional ONNX Runtime with Vulkan/CPU) to recover shadow and highlight "
+                 "micro-detail, add perceptual depth in flat midtones, and expand lights, "
+                 "sky, and speculars."));
+        aiLayout->addRow(QString(), m_aiEnhanced);
+
+        m_aiStrength = new QDoubleSpinBox(aiGroup);
+        m_aiStrength->setRange(0.0, 100.0);
+        m_aiStrength->setSuffix(QStringLiteral(" %"));
+        m_aiStrength->setDecimals(0);
+        m_aiStrength->setSingleStep(5.0);
+        m_aiStrength->setToolTip(
+            i18n("How strongly guidance applies shadow/highlight detail, depth, and highlight expansion."));
+        aiLayout->addRow(i18n("AI strength:"), m_aiStrength);
+
+        m_aiQuality = new QComboBox(aiGroup);
+        m_aiQuality->addItem(i18n("Performance — 1/4 map, every frame"),
+                             static_cast<int>(AutoHdr::AiQuality::Performance));
+        m_aiQuality->addItem(i18n("Balanced — 1/2 map, every frame"),
+                             static_cast<int>(AutoHdr::AiQuality::Balanced));
+        m_aiQuality->addItem(i18n("Quality — full map, every frame"),
+                             static_cast<int>(AutoHdr::AiQuality::Quality));
+        m_aiQuality->setToolTip(
+            i18n("Guidance map resolution. Higher tiers cost more GPU time but reduce "
+                 "blockiness and keep highlights locked to motion."));
+        aiLayout->addRow(i18n("AI quality:"), m_aiQuality);
+
+        m_aiBackend = new QComboBox(aiGroup);
+        m_aiBackend->addItem(i18n("Auto — ONNX when available, else GLSL"),
+                             static_cast<int>(AutoHdr::AiBackend::Auto));
+        m_aiBackend->addItem(i18n("ONNX Runtime (Vulkan/CPU)"),
+                             static_cast<int>(AutoHdr::AiBackend::Onnx));
+        m_aiBackend->addItem(i18n("GLSL only"), static_cast<int>(AutoHdr::AiBackend::GlslOnly));
+        m_aiBackend->setToolTip(
+            i18n("GLSL and ONNX both use the guidance_v1 detail model on the GPU (same look, any quality tier). "
+                 "Set AUTOHDR_ONNX_FORCE_ORT=1 to force real ONNX Runtime readback (slower, for future models)."));
+        aiLayout->addRow(i18n("AI backend:"), m_aiBackend);
+
+        auto *aiBackendNote = new QLabel(
+            i18n("ONNX v1 runs on the GPU by default (onnx-style-gpu). "
+                 "Force ORT readback only if you need a non-v1 model."),
+            aiGroup);
+        aiBackendNote->setWordWrap(true);
+        aiBackendNote->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        aiLayout->addRow(QString(), aiBackendNote);
+
+        layout->addWidget(aiGroup);
+
+        auto *chromaGroup = new QGroupBox(i18n("AI Chroma Inference"), widget());
+        auto *chromaLayout = new QFormLayout(chromaGroup);
+
+        m_aiChromaEnabled = new QCheckBox(i18n("Enable AI chroma refinement"), chromaGroup);
+        m_aiChromaEnabled->setToolTip(
+            i18n("Infers color corrections separately from luminance: reduces chroma banding, "
+                 "recovers highlight color, and adapts perceptual color intensity per pixel."));
+        chromaLayout->addRow(QString(), m_aiChromaEnabled);
+
+        m_aiChromaStrength = new QDoubleSpinBox(chromaGroup);
+        m_aiChromaStrength->setRange(0.0, 100.0);
+        m_aiChromaStrength->setSuffix(QStringLiteral(" %"));
+        m_aiChromaStrength->setDecimals(0);
+        m_aiChromaStrength->setSingleStep(5.0);
+        m_aiChromaStrength->setToolTip(
+            i18n("How strongly the chroma map applies color refinement (Y-locked)."));
+        chromaLayout->addRow(i18n("Chroma strength:"), m_aiChromaStrength);
+
+        layout->addWidget(chromaGroup);
+
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
         layout->addWidget(m_autoActivate);
 
@@ -167,11 +240,17 @@ public:
 
         connect(m_autoActivate, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_perceptualColor, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_aiEnhanced, &QCheckBox::toggled, this, &KCModule::markAsChanged);
         connect(m_toneCurveEditor, &ToneCurveEditor::settingsChanged, this, &KCModule::markAsChanged);
         connect(m_curveAntialias, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_antiAliasingQuality, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_highlightSoftness, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
+        connect(m_aiStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_aiQuality, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
+        connect(m_aiBackend, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
+        connect(m_aiChromaEnabled, &QCheckBox::toggled, this, &KCModule::markAsChanged);
+        connect(m_aiChromaStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
     }
 
     void load() override
@@ -199,6 +278,14 @@ public:
         const int aaQualityIndex = m_antiAliasingQuality->findData(general.antiAliasingQuality);
         m_antiAliasingQuality->setCurrentIndex(aaQualityIndex >= 0 ? aaQualityIndex : 0);
         m_highlightSoftness->setValue(general.highlightSoftness * 100.0);
+        m_aiEnhanced->setChecked(general.aiEnhanced);
+        m_aiStrength->setValue(general.aiStrength * 100.0);
+        const int aiQualityIndex = m_aiQuality->findData(static_cast<int>(general.aiQuality));
+        m_aiQuality->setCurrentIndex(aiQualityIndex >= 0 ? aiQualityIndex : 1);
+        const int aiBackendIndex = m_aiBackend->findData(static_cast<int>(general.aiBackend));
+        m_aiBackend->setCurrentIndex(aiBackendIndex >= 0 ? aiBackendIndex : 0);
+        m_aiChromaEnabled->setChecked(general.aiChromaEnabled);
+        m_aiChromaStrength->setValue(general.aiChromaStrength * 100.0);
 
         rebuildAppsTable();
     }
@@ -244,6 +331,14 @@ public:
             m_antiAliasingQuality->currentData().toInt());
         general.highlightSoftness =
             AutoHdr::clampHighlightSoftness(static_cast<float>(m_highlightSoftness->value() / 100.0));
+        general.aiEnhanced = m_aiEnhanced->isChecked();
+        general.aiStrength =
+            AutoHdr::clampAiStrength(static_cast<float>(m_aiStrength->value() / 100.0));
+        general.aiQuality = AutoHdr::clampAiQuality(m_aiQuality->currentData().toInt());
+        general.aiBackend = AutoHdr::clampAiBackend(m_aiBackend->currentData().toInt());
+        general.aiChromaEnabled = m_aiChromaEnabled->isChecked();
+        general.aiChromaStrength =
+            AutoHdr::clampAiChromaStrength(static_cast<float>(m_aiChromaStrength->value() / 100.0));
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -321,6 +416,12 @@ private:
     KSharedConfigPtr m_config;
     QCheckBox *m_autoActivate = nullptr;
     QCheckBox *m_perceptualColor = nullptr;
+    QCheckBox *m_aiEnhanced = nullptr;
+    QDoubleSpinBox *m_aiStrength = nullptr;
+    QComboBox *m_aiQuality = nullptr;
+    QComboBox *m_aiBackend = nullptr;
+    QCheckBox *m_aiChromaEnabled = nullptr;
+    QDoubleSpinBox *m_aiChromaStrength = nullptr;
     QDoubleSpinBox *m_curveAntialias = nullptr;
     QComboBox *m_antiAliasingQuality = nullptr;
     QDoubleSpinBox *m_highlightSoftness = nullptr;

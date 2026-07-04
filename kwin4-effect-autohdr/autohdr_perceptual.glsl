@@ -71,8 +71,14 @@ float autohdrComputePqMul(float yIn, float yOut, vec4 pqParams)
 }
 
 // PQ perceptual remap in XYZ; colorIntensity blends Y-only vs full-XYZ PQ boost.
-vec3 applyPerceptualLuminanceMap(vec3 rgbNits, float yIn, float yOut, float colorIntensity, vec4 pqParams)
+// localColorIntensity >= 0 selects per-pixel blend; negative uses global colorIntensity only.
+vec3 applyPerceptualLuminanceMap(vec3 rgbNits, float yIn, float yOut, float colorIntensity, vec4 pqParams,
+                                 float localColorIntensity)
 {
+    float effectiveIntensity = colorIntensity;
+    if (localColorIntensity >= 0.0) {
+        effectiveIntensity = localColorIntensity;
+    }
     float p0 = pqParams.x;
     float p1 = pqParams.y;
     float p3 = pqParams.z;
@@ -95,17 +101,17 @@ vec3 applyPerceptualLuminanceMap(vec3 rgbNits, float yIn, float yOut, float colo
     float pqMul = autohdrComputePqMul(yIn, yOut, pqParams);
     vec3 xyzResult;
 
-    if (colorIntensity <= 0.001) {
+    if (effectiveIntensity <= 0.001) {
         float newLuma =
             autohdrPqToLinear(autohdrLinearToPq(fLuma, p0) * pqMul, p1) / p3;
         xyzResult = xyz * (newLuma / fLuma);
-    } else if (colorIntensity >= 0.999) {
+    } else if (effectiveIntensity >= 0.999) {
         xyzResult = autohdrPqToLinear(autohdrLinearToPq(xyz, p0) * pqMul, p1) / p3;
     } else {
         vec4 newColor =
             autohdrPqToLinear(autohdrLinearToPq(vec4(xyz, fLuma), p0) * pqMul, p1) / p3;
         vec3 lumaOnlyXyz = xyz * (newColor.w / fLuma);
-        xyzResult = mix(lumaOnlyXyz, newColor.rgb, colorIntensity);
+        xyzResult = mix(lumaOnlyXyz, newColor.rgb, effectiveIntensity);
     }
 
     return max(autohdrXyzToRec709(xyzResult), vec3(0.0));

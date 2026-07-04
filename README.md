@@ -6,10 +6,14 @@ A KWin desktop effect for KDE Plasma 6. It tone-maps individual windows so SDR a
 
 When AutoHDR is active on a window, KWin redirects that window offscreen and runs a GLSL fragment shader on it. The shader applies black point adjustment, a tone curve lookup table, vibrance, and gamut expansion. It reads KDE's HDR calibration (reference white and peak luminance) from your existing display settings and stores per-application profiles on disk.
 
+Optional **AI-enhanced HDR** adds a low-resolution content-aware guidance map on top of the classical path. It recovers shadow and highlight micro-detail lost to 8-bit SDR, adds perceptual depth (local contrast) in flat midtones, and steers highlight expansion (RTX HDR–style). On AMD/Mesa the default is a GLSL analysis pass; if ONNX Runtime is installed at build time, Auto can use the Vulkan EP then CPU.
+
 ```mermaid
 flowchart LR
     Window --> KWinEffect
     KWinEffect --> Shader
+    KWinEffect --> Guidance["Guidance map GLSL or ONNX"]
+    Guidance --> Shader
     ConfigFile["~/.config/kwin4effectautohdr"] --> KWinEffect
     CalibrateUI["plasma-autohdr-calibrate"] --> ConfigFile
 ```
@@ -26,6 +30,7 @@ flowchart LR
 | HDR display with KDE HDR enabled | Uses reference and peak nits from KDE's HDR settings |
 | OpenGL offscreen effects | Required by KWin's offscreen effect path |
 | Python 3 + PySide6 | Only for the calibration dialog |
+| onnxruntime (optional) | Enables ONNX guidance (Vulkan/CPU). Without it, AI mode uses GLSL only |
 
 The install script handles dependencies on Arch, CachyOS, Manjaro, Debian, Ubuntu, Mint, Fedora, and RHEL-family distros. Other distros can install the packages manually and run with `--skip-deps`.
 
@@ -95,7 +100,67 @@ You can edit them in two places:
 
 Built-in presets: Linear, Balanced, Lifted Shadows, Soft Shadows, Vivid Highlights, High Contrast, Exponential, Custom, and User. Custom curves use draggable control points. User presets are saved in the config file and can be reused across applications.
 
-Per-profile settings include max nits, reference nits, gamut expansion, black point, vibrance, tone curve points, and an optional per-app auto-activate flag.
+Per-profile settings include max nits, reference nits, gamut expansion, black point, vibrance, tone curve points, optional AI-enhanced HDR / strength, and an optional per-app auto-activate flag.
+
+### AI-enhanced HDR
+
+Disabled by default. Enable globally in **System Settings → Desktop Effects → AutoHDR**, or per app in the calibration overlay.
+
+| Setting | Meaning |
+|---------|---------|
+| AI-enhanced HDR | Content-aware shadow/highlight detail recovery, perceptual depth, and highlight expansion |
+| AI strength | How strongly the guidance map applies detail, depth, and expansion (0–100%) |
+| AI quality | Guidance/chroma map resolution and update interval (Performance every 3 frames / Balanced every 2 / Quality every frame) |
+| AI backend | Auto (ONNX when built-in, else GLSL), ONNX Runtime, or GLSL only |
+
+Guidance map channels (RGBA): highlight expansion, highlight confidence, shadow-detail mask, depth/local-contrast mask.
+
+### AI chroma inference
+
+Disabled by default. Enable globally in **System Settings → Desktop Effects → AutoHDR → AI Chroma Inference**, or per app in the calibration overlay.
+
+| Setting | Meaning |
+|---------|---------|
+| AI chroma refinement | Y-locked color corrections separate from luminance: chroma banding reduction, highlight color recovery, per-pixel perceptual color intensity |
+| Chroma strength | How strongly the chroma map applies (0–100%) |
+
+Chroma map channels (RGBA): correction strength, saturation residual hint, hue residual hint, per-pixel `colorIntensity` blend for PQ remap.
+
+Environment overrides:
+
+| Variable | Effect |
+|----------|--------|
+| `AUTOHDR_CHROMA=0` | Force chroma AI off |
+| `AUTOHDR_CHROMA=1` | Force chroma AI on (global) |
+| `AUTOHDR_CHROMA_MODEL` | Path to a chroma `.onnx` model |
+
+| Variable | Effect |
+|----------|--------|
+| `AUTOHDR_AI=0` | Force AI off |
+| `AUTOHDR_AI=1` | Force AI on (global) |
+| `AUTOHDR_AI_QUALITY` | `Performance`, `Balanced`, or `Quality` |
+| `AUTOHDR_ONNX_MODEL` | Path to a guidance `.onnx` model |
+| `AUTOHDR_ONNX_EP` | Force `vulkan`, `cpu`, or `cuda` |
+| `AUTOHDR_FLOAT_FBO` | Prefer `GL_RGBA16F` capture (also enabled automatically when AI is on) |
+
+Rebuild the optional ONNX plumbing model with:
+
+```bash
+python3 -m venv kwin4-effect-autohdr/.venv-tools
+kwin4-effect-autohdr/.venv-tools/bin/pip install onnx numpy
+kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/export_guidance_v1.py
+kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/export_chroma_v0.py
+```
+
+Train a learned chroma model (optional):
+
+```bash
+pip install torch
+python kwin4-effect-autohdr/training/train_chroma.py
+python kwin4-effect-autohdr/training/export_chroma_v1.py
+```
+
+CMake option: `-DAUTOHDR_ENABLE_ONNX=OFF` to skip ONNX Runtime detection.
 
 ## Building from source
 

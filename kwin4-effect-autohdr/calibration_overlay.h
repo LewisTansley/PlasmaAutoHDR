@@ -10,6 +10,7 @@
 
 #include <KSharedConfig>
 #include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QWidget>
 
 class QDialogButtonBox;
@@ -50,5 +51,9 @@ private:
     QWidget *m_contentPanel = nullptr;
     ToneCurveEditor *m_editor = nullptr;
     QCheckBox *m_perceptualColor = nullptr;
+    QCheckBox *m_aiEnhanced = nullptr;
+    QDoubleSpinBox *m_aiStrength = nullptr;
+    QCheckBox *m_aiChromaEnabled = nullptr;
+    QDoubleSpinBox *m_aiChromaStrength = nullptr;
     QDialogButtonBox *m_buttons = nullptr;
 };

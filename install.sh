@@ -113,6 +113,8 @@ install_dependencies() {
                 qt6-base qt6-tools kwin \
                 kconfig kconfigwidgets kcmutils kcoreaddons kglobalaccel ki18n \
                 pyside6
+            # Optional AI guidance backend (Vulkan/CPU EPs). Safe to skip if unavailable.
+            sudo pacman -S --needed --noconfirm onnxruntime 2>/dev/null || true
             ;;
         debian)
             if ! command -v apt-get >/dev/null 2>&1; then

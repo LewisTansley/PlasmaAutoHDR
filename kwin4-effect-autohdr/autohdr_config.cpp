@@ -44,6 +44,100 @@ int clampAntiAliasingQuality(int value)
     return qBound(0, value, 2);
 }
 
+float clampAiStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
+float clampAiChromaStrength(float value)
+{
+    return qBound(0.0f, value, 1.0f);
+}
+
+AiQuality clampAiQuality(int value)
+{
+    return static_cast<AiQuality>(qBound(0, value, 2));
+}
+
+AiBackend clampAiBackend(int value)
+{
+    return static_cast<AiBackend>(qBound(0, value, 2));
+}
+
+int aiGuidanceScale(AiQuality quality)
+{
+    switch (quality) {
+    case AiQuality::Performance:
+        return 4;
+    case AiQuality::Quality:
+        return 1;
+    case AiQuality::Balanced:
+    default:
+        return 2;
+    }
+}
+
+int aiInferenceInterval(AiQuality quality)
+{
+    switch (quality) {
+    case AiQuality::Performance:
+        return 3;
+    case AiQuality::Quality:
+        return 1;
+    case AiQuality::Balanced:
+    default:
+        return 2;
+    }
+}
+
+QString aiQualityToString(AiQuality quality)
+{
+    switch (quality) {
+    case AiQuality::Performance:
+        return QStringLiteral("Performance");
+    case AiQuality::Quality:
+        return QStringLiteral("Quality");
+    case AiQuality::Balanced:
+    default:
+        return QStringLiteral("Balanced");
+    }
+}
+
+AiQuality aiQualityFromString(const QString &value)
+{
+    if (value.compare(QStringLiteral("Performance"), Qt::CaseInsensitive) == 0) {
+        return AiQuality::Performance;
+    }
+    if (value.compare(QStringLiteral("Quality"), Qt::CaseInsensitive) == 0) {
+        return AiQuality::Quality;
+    }
+    return AiQuality::Balanced;
+}
+
+QString aiBackendToString(AiBackend backend)
+{
+    switch (backend) {
+    case AiBackend::Onnx:
+        return QStringLiteral("Onnx");
+    case AiBackend::GlslOnly:
+        return QStringLiteral("GlslOnly");
+    case AiBackend::Auto:
+    default:
+        return QStringLiteral("Auto");
+    }
+}
+
+AiBackend aiBackendFromString(const QString &value)
+{
+    if (value.compare(QStringLiteral("Onnx"), Qt::CaseInsensitive) == 0) {
+        return AiBackend::Onnx;
+    }
+    if (value.compare(QStringLiteral("GlslOnly"), Qt::CaseInsensitive) == 0) {
+        return AiBackend::GlslOnly;
+    }
+    return AiBackend::Auto;
+}
+
 namespace {
 
 QPointF migrateSdrMaxPoint(const KConfigGroup &group, float peakNits)
@@ -166,6 +260,12 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
         clampCurveAntialiasStrength(group.readEntry("CurveAntialiasStrength", 0.45f));
     general.highlightSoftness = clampHighlightSoftness(group.readEntry("HighlightSoftness", 0.30f));
     general.antiAliasingQuality = clampAntiAliasingQuality(group.readEntry("AntiAliasingQuality", 0));
+    general.aiEnhanced = group.readEntry("AiEnhanced", false);
+    general.aiStrength = clampAiStrength(group.readEntry("AiStrength", 0.5f));
+    general.aiQuality = aiQualityFromString(group.readEntry("AiQuality", QStringLiteral("Balanced")));
+    general.aiBackend = aiBackendFromString(group.readEntry("AiBackend", QStringLiteral("Auto")));
+    general.aiChromaEnabled = group.readEntry("AiChromaEnabled", false);
+    general.aiChromaStrength = clampAiChromaStrength(group.readEntry("AiChromaStrength", 0.5f));
     return general;
 }
 
@@ -177,6 +277,12 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("CurveAntialiasStrength", general.curveAntialiasStrength);
     group.writeEntry("HighlightSoftness", general.highlightSoftness);
     group.writeEntry("AntiAliasingQuality", general.antiAliasingQuality);
+    group.writeEntry("AiEnhanced", general.aiEnhanced);
+    group.writeEntry("AiStrength", general.aiStrength);
+    group.writeEntry("AiQuality", aiQualityToString(general.aiQuality));
+    group.writeEntry("AiBackend", aiBackendToString(general.aiBackend));
+    group.writeEntry("AiChromaEnabled", general.aiChromaEnabled);
+    group.writeEntry("AiChromaStrength", general.aiChromaStrength);
     config->sync();
 }
 
@@ -187,6 +293,10 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.gamutExpansion = group.readEntry("GamutExpansion", 1.5f);
     settings.blackPoint = group.readEntry("BlackPoint", 0.0f);
     settings.colorIntensity = group.readEntry("ColorIntensity", 0.33f);
+    settings.aiEnhanced = group.readEntry("AiEnhanced", false);
+    settings.aiStrength = clampAiStrength(group.readEntry("AiStrength", 0.5f));
+    settings.aiChromaEnabled = group.readEntry("AiChromaEnabled", false);
+    settings.aiChromaStrength = clampAiChromaStrength(group.readEntry("AiChromaStrength", 0.5f));
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -226,6 +336,10 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("GamutExpansion", settings.gamutExpansion);
     group.writeEntry("BlackPoint", settings.blackPoint);
     group.writeEntry("ColorIntensity", settings.colorIntensity);
+    group.writeEntry("AiEnhanced", settings.aiEnhanced);
+    group.writeEntry("AiStrength", settings.aiStrength);
+    group.writeEntry("AiChromaEnabled", settings.aiChromaEnabled);
+    group.writeEntry("AiChromaStrength", settings.aiChromaStrength);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -342,6 +456,8 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     settings.colorIntensity = clampColorIntensity(settings.colorIntensity);
     settings.blackPoint = clampBlackPoint(settings.blackPoint);
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
+    settings.aiStrength = clampAiStrength(settings.aiStrength);
+    settings.aiChromaStrength = clampAiChromaStrength(settings.aiChromaStrength);
 
     const float peakNits = qMin(settings.maxNits, maxDisplayNits);
     settings.maxNits = peakNits;

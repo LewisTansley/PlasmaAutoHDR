@@ -65,8 +65,12 @@ decky-autohdr/dist/*.map
 
 # Python environments (future-proofing)
 .venv/
+.venv-tools/
 venv/
 *.egg-info/
+
+# Local git worktrees
+.worktrees/
 
 # Editor / tooling
 .cursor/

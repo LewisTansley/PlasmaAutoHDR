@@ -47,6 +47,161 @@ float luminanceYNits(vec3 rgbNits)
     return autohdrRec709ToXYZ(rgbNits).y;
 }
 
+// Soft toe stretch through ~0.25 relative luma (not a hard cut at 8/255).
+float expandShadowDetailRel(float t)
+{
+    const float span = 0.25;
+    if (t >= span) {
+        return t;
+    }
+    float u = clamp(t / max(span, 1e-6), 0.0, 1.0);
+    return pow(u, 0.75) * span;
+}
+
+// Content-aware shoulder separation: stretch the top band upward into headroom.
+// Never pull highlights down — that left flat interiors darker than their edges.
+float expandHighlightDetailRel(float t)
+{
+    const float knee = 1.0 - 8.0 / 255.0;
+    const float kneeWidth = 8.0 / 255.0;
+    const float ceiling = 1.05;
+    if (t <= knee) {
+        return t;
+    }
+    float u = clamp((t - knee) / max(1.0 - knee, 1e-6), 0.0, 1.0);
+    float expanded = knee + pow(u, 0.75) * (ceiling - knee);
+    return mix(t, expanded, smoothstep(knee, knee + kneeWidth * 0.5, t));
+}
+
+// Reposition within neighborhood luma envelope using wide-context hint (zero net lift).
+vec3 applyRampInference(vec3 rgbNits, float refNits, float mask, float strength, float localMinNits,
+                        float localMaxNits, float localAvgNits, float wideAvgNits, float localRangeNits)
+{
+    float span = localMaxNits - localMinNits;
+    const float lsb = refNits / 255.0;
+    if (span < lsb * 0.5) {
+        return rgbNits;
+    }
+
+    float w = clamp(mask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float pos = clamp((luma - localMinNits) / span, 0.0, 1.0);
+    float widePos = clamp((wideAvgNits - localMinNits) / span, 0.0, 1.0);
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    float rampGate = smoothstep(0.5 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(2.5 * lsb, 4.0 * lsb, rangeRel));
+
+    float inferredPos = mix(pos, mix(pos, widePos, 0.4), w * rampGate);
+    float newLuma = clamp(localMinNits + inferredPos * span, localMinNits, localMaxNits);
+    return rgbNits * (newLuma / luma);
+}
+
+// Reconstruct smooth ramps under 8-bit quantization steps (mean-preserving).
+vec3 applyDecontour(vec3 rgbNits, float refNits, float mask, float strength, float wideAvgNits,
+                    float localRangeNits, float localAvgNits, float shadowWeight, float highlightWeight)
+{
+    float w = clamp(mask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4 || wideAvgNits <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float avg = localAvgNits > 0.0 ? localAvgNits : luma;
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    const float lsb = 1.0 / 255.0;
+    float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
+    float plateau = 1.0 - smoothstep(0.0, 0.75 * lsb, rangeRel);
+    float decontourW = max(rampBand, plateau * 0.65) * w;
+
+    float t = luma / max(refNits, 1.0);
+    float crushed = 1.0 - smoothstep(0.05, 0.22, t);
+    float shoulder = smoothstep(0.82, 0.96, t);
+    float regionBlend = max(
+        mix(0.40, 0.62, clamp(shadowWeight, 0.0, 1.0) * crushed),
+        mix(0.35, 0.55, clamp(highlightWeight, 0.0, 1.0) * shoulder));
+
+    float dev = luma - avg;
+    float wideDev = wideAvgNits - avg;
+    float hint = sign(wideDev != 0.0 ? wideDev : dev)
+        * min(abs(wideDev), max(localRangeNits * 0.45, refNits * lsb));
+    float targetDev = mix(dev, dev + hint * 0.65, decontourW * regionBlend);
+    float newLuma = max(avg + targetDev, 1e-6);
+    return rgbNits * (newLuma / luma);
+}
+
+// Mean-preserving shadow residual stretch (contrast only — no absolute toe lift).
+vec3 applyShadowDetail(vec3 rgbNits, float refNits, float shadowMask, float strength, float localAvgNits,
+                       float localRangeNits)
+{
+    float w = clamp(shadowMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float avg = localAvgNits > 0.0 ? localAvgNits : luma;
+    float t = luma / max(refNits, 1.0);
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    const float lsb = 1.0 / 255.0;
+    float crushed = 1.0 - smoothstep(0.05, 0.22, t);
+    float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
+    float flatGate = max(1.0 - smoothstep(1.0 * lsb, 2.5 * lsb, rangeRel), rampBand);
+
+    float delta = luma - avg;
+    float gain = mix(1.0, mix(1.85, 2.35, crushed), w * flatGate);
+    float newLuma = max(avg + delta * gain, 1e-6);
+    return rgbNits * (newLuma / luma);
+}
+
+// Mean-preserving highlight residual stretch (shoulder band, gated by quantization flatness).
+vec3 applyHighlightDetail(vec3 rgbNits, float refNits, float highlightMask, float strength, float localAvgNits,
+                          float localRangeNits)
+{
+    float w = clamp(highlightMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float avg = localAvgNits > 0.0 ? localAvgNits : luma;
+    float t = luma / max(refNits, 1.0);
+    float shoulder = smoothstep(0.82, 0.96, t);
+    const float lsb = 1.0 / 255.0;
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
+    float flatGate = max(1.0 - smoothstep(1.0 * lsb, 2.5 * lsb, rangeRel), rampBand);
+
+    float delta = luma - avg;
+    float gain = mix(1.0, mix(1.55, 2.0, shoulder), w * shoulder * flatGate);
+    float newLuma = max(avg + delta * gain, 1e-6);
+    return rgbNits * (newLuma / luma);
+}
+
+// Multi-scale local contrast / perceptual depth (edge-aware).
+vec3 applyDepthContrast(vec3 rgbNits, float localAvgNits, float wideAvgNits, float depthMask, float strength,
+                        float refNits)
+{
+    float w = clamp(depthMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4 || localAvgNits <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float wide = wideAvgNits > 0.0 ? wideAvgNits : localAvgNits;
+    float fineRel = abs(luma - localAvgNits) / max(refNits, 1.0);
+    float edgeProtect = 1.0 - smoothstep(0.008, 0.04, fineRel);
+    float gain = mix(1.0, 1.4, w * edgeProtect);
+    float newLuma = max(wide + (luma - wide) * gain, 1e-6);
+    return rgbNits * (newLuma / luma);
+}
+
 vec3 autohdrAp1D65ToRec709(vec3 linearAP1)
 {
     const mat3 ap1D65ToXYZ = mat3(

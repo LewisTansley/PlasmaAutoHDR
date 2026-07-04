@@ -14,6 +14,18 @@
 
 namespace AutoHdr {
 
+enum class AiQuality {
+    Performance = 0,
+    Balanced = 1,
+    Quality = 2,
+};
+
+enum class AiBackend {
+    Auto = 0,
+    Onnx = 1,
+    GlslOnly = 2,
+};
+
 struct CalibrationSettings {
     float maxNits = 1000.0f;
     float gamutExpansion = 1.5f;
@@ -24,6 +36,10 @@ struct CalibrationSettings {
     QVector<QPointF> toneCurvePoints;
     ToneCurvePreset toneCurvePreset = ToneCurvePreset::Linear;
     QString toneCurveUserPresetId;
+    bool aiEnhanced = false;
+    float aiStrength = 0.5f;
+    bool aiChromaEnabled = false;
+    float aiChromaStrength = 0.5f;
 };
 
 constexpr float kReferenceNitsMin = 80.0f;
@@ -36,6 +52,16 @@ float clampColorIntensity(float value);
 float clampCurveAntialiasStrength(float value);
 float clampHighlightSoftness(float value);
 int clampAntiAliasingQuality(int value);
+float clampAiStrength(float value);
+float clampAiChromaStrength(float value);
+AiQuality clampAiQuality(int value);
+AiBackend clampAiBackend(int value);
+int aiGuidanceScale(AiQuality quality);
+int aiInferenceInterval(AiQuality quality);
+QString aiQualityToString(AiQuality quality);
+AiQuality aiQualityFromString(const QString &value);
+QString aiBackendToString(AiBackend backend);
+AiBackend aiBackendFromString(const QString &value);
 
 struct AppProfileMetadata {
     QString key;
@@ -57,6 +83,12 @@ struct GeneralSettings {
     float curveAntialiasStrength = 0.45f;
     float highlightSoftness = 0.30f;
     int antiAliasingQuality = 0;
+    bool aiEnhanced = false;
+    float aiStrength = 0.5f;
+    AiQuality aiQuality = AiQuality::Balanced;
+    AiBackend aiBackend = AiBackend::Auto;
+    bool aiChromaEnabled = false;
+    float aiChromaStrength = 0.5f;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";
