@@ -53,7 +53,5 @@ private:
     QCheckBox *m_perceptualColor = nullptr;
     QCheckBox *m_aiEnhanced = nullptr;
     QDoubleSpinBox *m_aiStrength = nullptr;
-    QCheckBox *m_aiChromaEnabled = nullptr;
-    QDoubleSpinBox *m_aiChromaStrength = nullptr;
     QDialogButtonBox *m_buttons = nullptr;
 };

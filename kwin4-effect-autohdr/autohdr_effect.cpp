@@ -1,5 +1,7 @@
 #include "autohdr_effect.h"
 #include "autohdr_display.h"
+#include <algorithm>
+#include <cmath>
 #include <core/backendoutput.h>
 #include <core/colorspace.h>
 #include <core/region.h>
@@ -164,7 +166,6 @@ namespace KWin {
         loadShader();
         loadPassShaders();
         initGuidanceInference();
-        initChromaInference();
         if (effects->makeOpenGLContextCurrent()) {
             captureInternalFormat();
         }
@@ -172,6 +173,10 @@ namespace KWin {
 
     AutoHDREffect::~AutoHDREffect()
     {
+        if (m_guidanceWorker) {
+            m_guidanceWorker->shutdown();
+            m_guidanceWorker.reset();
+        }
         unregisterDBusService();
         effects->hideOnScreenMessage();
         if (m_calibrationOverlay) {
@@ -384,14 +389,11 @@ namespace KWin {
         }
         m_aiEnabledGlobal = general.aiEnhanced;
         m_aiStrengthGlobal = general.aiStrength;
-        m_aiChromaEnabledGlobal = general.aiChromaEnabled;
-        m_aiChromaStrengthGlobal = general.aiChromaStrength;
+        m_aiBandingStrengthGlobal = general.aiBandingStrength;
         m_aiQuality = general.aiQuality;
         m_aiBackend = general.aiBackend;
         m_globalDefaults.aiEnhanced = general.aiEnhanced;
         m_globalDefaults.aiStrength = general.aiStrength;
-        m_globalDefaults.aiChromaEnabled = general.aiChromaEnabled;
-        m_globalDefaults.aiChromaStrength = general.aiChromaStrength;
         if (qEnvironmentVariableIsSet("AUTOHDR_AI_QUALITY")) {
             m_aiQuality = AutoHdr::aiQualityFromString(qEnvironmentVariable("AUTOHDR_AI_QUALITY"));
         }
@@ -404,23 +406,12 @@ namespace KWin {
                 m_aiEnabledGlobal = true;
             }
         }
-        if (qEnvironmentVariableIsSet("AUTOHDR_CHROMA")) {
-            if (qEnvironmentVariableIntValue("AUTOHDR_CHROMA") == 0) {
-                m_aiChromaForceDisabled = true;
-            } else {
-                m_aiChromaForceDisabled = false;
-                m_aiChromaEnabledGlobal = true;
-            }
-        }
         sanitizeGlobalDefaults(persistSanitize);
         loadShader();
         loadPassShaders();
         initGuidanceInference();
-        initChromaInference();
         invalidateAllGuidance();
-        invalidateAllChroma();
         m_loggedGuidanceBackend = false;
-        m_loggedChromaBackend = false;
         m_redirectInternalFormat = 0;
     }
 
@@ -536,11 +527,9 @@ namespace KWin {
         m_locAntiAliasingQuality = m_shader->uniformLocation("antiAliasingQuality");
         m_locEnableSpatialAvgPreCurve = m_shader->uniformLocation("enableSpatialAvgPreCurve");
         m_locGuidanceMap = m_shader->uniformLocation("guidanceMap");
-        m_locChromaMap = m_shader->uniformLocation("chromaMap");
         m_locAiStrength = m_shader->uniformLocation("aiStrength");
-        m_locAiChromaStrength = m_shader->uniformLocation("aiChromaStrength");
+        m_locAiBandingStrength = m_shader->uniformLocation("aiBandingStrength");
         m_locAiEnhanced = m_shader->uniformLocation("aiEnhanced");
-        m_locAiChromaEnabled = m_shader->uniformLocation("aiChromaEnabled");
         warnMissingToneCurveUniformsOnce();
         warnMissingPerceptualUniformsOnce();
         if (!m_warnedMissingAiUniforms && (m_locAiEnhanced < 0 || m_locAiStrength < 0)) {
@@ -610,20 +599,11 @@ namespace KWin {
         if (m_locAiEnhanced >= 0) {
             m_shader->setUniform(m_locAiEnhanced, shouldUseAi(settings) ? 1 : 0);
         }
-        if (m_locAiChromaEnabled >= 0) {
-            m_shader->setUniform(m_locAiChromaEnabled, shouldUseAiChroma(settings) ? 1 : 0);
-        }
-        if (m_locAiChromaStrength >= 0) {
-            const float chromaStrength = settings.aiChromaEnabled
-                ? settings.aiChromaStrength
-                : (m_aiChromaEnabledGlobal ? m_aiChromaStrengthGlobal : settings.aiChromaStrength);
-            m_shader->setUniform(m_locAiChromaStrength, AutoHdr::clampAiChromaStrength(chromaStrength));
+        if (m_locAiBandingStrength >= 0) {
+            m_shader->setUniform(m_locAiBandingStrength, AutoHdr::clampAiBandingStrength(m_aiBandingStrengthGlobal));
         }
         if (m_locGuidanceMap >= 0) {
             m_shader->setUniform(m_locGuidanceMap, 1);
-        }
-        if (m_locChromaMap >= 0) {
-            m_shader->setUniform(m_locChromaMap, 2);
         }
 
         uploadToneCurveUniforms();
@@ -650,8 +630,7 @@ namespace KWin {
 
         const QByteArray colorSource = loadInclude("autohdr_color.glsl");
         const QByteArray perceptualSource = loadInclude("autohdr_perceptual.glsl");
-        const QByteArray chromaSource = loadInclude("autohdr_chroma.glsl");
-        if (colorSource.isEmpty() || perceptualSource.isEmpty() || chromaSource.isEmpty()) {
+        if (colorSource.isEmpty() || perceptualSource.isEmpty()) {
             return {};
         }
 
@@ -666,7 +645,6 @@ namespace KWin {
 
         replaceInclude("autohdr_color.glsl", colorSource);
         replaceInclude("autohdr_perceptual.glsl", perceptualSource);
-        replaceInclude("autohdr_chroma.glsl", chromaSource);
         return source;
     }
 
@@ -679,11 +657,9 @@ namespace KWin {
                 QFileInfo(shaderDir + QStringLiteral("/autohdr_color.glsl")).lastModified();
             const QDateTime perceptualMtime =
                 QFileInfo(shaderDir + QStringLiteral("/autohdr_perceptual.glsl")).lastModified();
-            const QDateTime chromaMtime =
-                QFileInfo(shaderDir + QStringLiteral("/autohdr_chroma.glsl")).lastModified();
             if (m_shader) {
                 if (fragMtime.isValid() && fragMtime == m_shaderFragMtime && colorMtime == m_shaderColorMtime
-                    && perceptualMtime == m_shaderPerceptualMtime && chromaMtime == m_shaderChromaMtime) {
+                    && perceptualMtime == m_shaderPerceptualMtime) {
                     return true;
                 }
                 m_shader.reset();
@@ -717,7 +693,6 @@ namespace KWin {
         m_shaderColorMtime = QFileInfo(shaderDir + QStringLiteral("/autohdr_color.glsl")).lastModified();
         m_shaderPerceptualMtime =
             QFileInfo(shaderDir + QStringLiteral("/autohdr_perceptual.glsl")).lastModified();
-        m_shaderChromaMtime = QFileInfo(shaderDir + QStringLiteral("/autohdr_chroma.glsl")).lastModified();
         resolveUniformLocations();
         return true;
     }
@@ -733,8 +708,7 @@ namespace KWin {
             return m_redirectInternalFormat;
         }
 
-        const bool wantFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO") || m_aiEnabledGlobal
-            || m_aiChromaEnabledGlobal;
+        const bool wantFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO") || m_aiEnabledGlobal;
         m_redirectInternalFormat = GL_RGBA8;
         if (wantFloat) {
             if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
@@ -754,6 +728,14 @@ namespace KWin {
         if (qEnvironmentVariableIsSet("AUTOHDR_ONNX_MODEL")) {
             return qEnvironmentVariable("AUTOHDR_ONNX_MODEL");
         }
+        if (qEnvironmentVariableIsSet("AUTOHDR_ONNX_V2")
+            && qEnvironmentVariableIntValue("AUTOHDR_ONNX_V2") != 0) {
+            const QString v2 =
+                locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v2.onnx"));
+            if (!v2.isEmpty()) {
+                return v2;
+            }
+        }
         const QString v1 =
             locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v1.onnx"));
         if (!v1.isEmpty()) {
@@ -762,89 +744,19 @@ namespace KWin {
         return locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v0.onnx"));
     }
 
-    QString AutoHDREffect::resolveChromaModelPath() const
+    bool AutoHDREffect::isGuidanceV2Model(const QString &modelPath) const
     {
-        if (qEnvironmentVariableIsSet("AUTOHDR_CHROMA_MODEL")) {
-            return qEnvironmentVariable("AUTOHDR_CHROMA_MODEL");
-        }
-        const QString v1 =
-            locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/chroma_v1.onnx"));
-        if (!v1.isEmpty()) {
-            return v1;
-        }
-        return locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/chroma_v0.onnx"));
-    }
-
-    void AutoHDREffect::initChromaInference()
-    {
-        if (m_aiChromaForceDisabled) {
-            m_chromaInference.reset();
-            m_chromaBackendName = QStringLiteral("disabled");
-            return;
-        }
-
-        const QString modelPath = resolveChromaModelPath();
-        m_chromaInference = AutoHdr::createOnnxChromaInference(modelPath);
-        m_chromaBackendName = m_chromaInference ? m_chromaInference->backendName() : QStringLiteral("none");
-        qInfo() << "AutoHDR Effect: chroma backend" << m_chromaBackendName;
-    }
-
-    void AutoHDREffect::invalidateAllChroma()
-    {
-        for (auto &entry : m_offscreenWindows) {
-            if (!entry.second) {
-                continue;
-            }
-            entry.second->chromaValid = false;
-            entry.second->needsChromaUpdate = true;
-            entry.second->inferenceFrameCounter = 0;
-        }
-    }
-
-    QString AutoHDREffect::activeChromaBackendLabel() const
-    {
-        if (m_aiChromaForceDisabled) {
-            return QStringLiteral("disabled");
-        }
-        if (m_aiBackend == AutoHdr::AiBackend::GlslOnly || !preferOnnxGuidance()) {
-            return QStringLiteral("GLSL");
-        }
-        if (useChromaOnnxGpuFastPath()) {
-            return QStringLiteral("onnx-style-gpu");
-        }
-        return m_chromaBackendName.isEmpty() ? QStringLiteral("onnx") : m_chromaBackendName;
-    }
-
-    bool AutoHDREffect::useChromaOnnxGpuFastPath() const
-    {
-        if (!preferOnnxGuidance()) {
-            return false;
-        }
-        if (qEnvironmentVariableIsSet("AUTOHDR_ONNX_FORCE_ORT")
-            && qEnvironmentVariableIntValue("AUTOHDR_ONNX_FORCE_ORT") != 0) {
-            return false;
-        }
-        const QString modelPath = resolveChromaModelPath();
-        return modelPath.isEmpty() || modelPath.contains(QStringLiteral("chroma_v0"))
-            || modelPath.contains(QStringLiteral("chroma_v1"));
-    }
-
-    bool AutoHDREffect::useChromaOnnxOrtReadback() const
-    {
-        return preferOnnxGuidance() && !useChromaOnnxGpuFastPath() && m_chromaInference
-            && m_chromaInference->isAvailable();
-    }
-
-    bool AutoHDREffect::shouldUseAiChroma(const CalibrationSettings &settings) const
-    {
-        if (m_aiChromaForceDisabled) {
-            return false;
-        }
-        return settings.aiChromaEnabled || m_aiChromaEnabledGlobal;
+        return modelPath.contains(QStringLiteral("guidance_v2"));
     }
 
     void AutoHDREffect::initGuidanceInference()
     {
+        if (m_guidanceWorker) {
+            m_guidanceWorker->shutdown();
+            m_guidanceWorker.reset();
+        }
+        m_guidanceAsyncPending = false;
+
         if (m_aiForceDisabled) {
             m_guidanceInference.reset();
             m_guidanceBackendName = QStringLiteral("disabled");
@@ -855,7 +767,72 @@ namespace KWin {
         m_guidanceInference = AutoHdr::createOnnxGuidanceInference(modelPath);
         m_guidanceBackendName =
             m_guidanceInference ? m_guidanceInference->backendName() : QStringLiteral("none");
+
+        if (useAsyncGuidanceInference() && m_guidanceInference && m_guidanceInference->isAvailable()) {
+            m_guidanceWorker = std::make_unique<AutoHdr::GuidanceWorker>(m_guidanceInference.get());
+            m_guidanceWorker->start();
+            if (!m_loggedV2Active) {
+                m_loggedV2Active = true;
+                qInfo() << "AutoHDR Effect: guidance_v2 active (AUTOHDR_ONNX_V2=1), async ORT on" << modelPath;
+            }
+            qInfo() << "AutoHDR Effect: async guidance worker started for" << modelPath;
+        }
+
         qInfo() << "AutoHDR Effect: guidance backend" << m_guidanceBackendName;
+    }
+
+    bool AutoHDREffect::useAsyncGuidanceInference() const
+    {
+        return useOnnxOrtReadback() && isGuidanceV2Model(resolveOnnxModelPath());
+    }
+
+    QSize AutoHDREffect::capGuidanceSizeForOrt(const QSize &size) const
+    {
+        constexpr int kMaxOrtPixels = 1920 * 1080;
+        const int pixels = size.width() * size.height();
+        if (pixels <= kMaxOrtPixels) {
+            return size;
+        }
+        const float scale = std::sqrt(static_cast<float>(kMaxOrtPixels) / static_cast<float>(pixels));
+        return QSize(qMax(1, static_cast<int>(size.width() * scale)),
+                     qMax(1, static_cast<int>(size.height() * scale)));
+    }
+
+    void AutoHDREffect::pollAsyncGuidanceResults()
+    {
+        if (!m_guidanceWorker) {
+            return;
+        }
+
+        if (m_guidanceAsyncPending && m_guidanceWorker->takeFailedJob()) {
+            m_guidanceAsyncPending = false;
+            m_asyncGuidanceTarget = nullptr;
+            if (!m_loggedAsyncFailure) {
+                m_loggedAsyncFailure = true;
+                qWarning() << "AutoHDR Effect: async ORT failed, keeping GLSL map";
+            }
+            return;
+        }
+
+        std::vector<float> rgba;
+        int width = 0;
+        int height = 0;
+        if (!m_guidanceWorker->tryTakeResult(&rgba, &width, &height)) {
+            return;
+        }
+
+        m_guidanceAsyncPending = false;
+        OffscreenWindowData *target = m_asyncGuidanceTarget;
+        m_asyncGuidanceTarget = nullptr;
+
+        if (!target || !target->guidanceTexture || target->guidanceSize.width() != width
+            || target->guidanceSize.height() != height) {
+            return;
+        }
+
+        blendGuidanceWithGlslFloor(rgba);
+        uploadGuidanceTexture(target, rgba.data(), width, height);
+        target->needsGuidanceUpdate = false;
     }
 
     void AutoHDREffect::invalidateAllGuidance()
@@ -865,6 +842,7 @@ namespace KWin {
                 continue;
             }
             entry.second->guidanceValid = false;
+            entry.second->guidanceEverUploaded = false;
             entry.second->needsGuidanceUpdate = true;
         }
     }
@@ -879,6 +857,9 @@ namespace KWin {
         }
         if (useOnnxGpuFastPath()) {
             return QStringLiteral("onnx-style-gpu");
+        }
+        if (useAsyncGuidanceInference()) {
+            return QStringLiteral("onnx-async");
         }
         return m_guidanceBackendName.isEmpty() ? QStringLiteral("onnx") : m_guidanceBackendName;
     }
@@ -991,35 +972,7 @@ namespace KWin {
             }
         }
 
-        if (!m_chromaShader) {
-            const QByteArray source = loadSimpleShaderSource(QStringLiteral("autohdr_chroma_guidance.frag"));
-            if (!source.isEmpty()) {
-                m_chromaShader =
-                    ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(), source);
-            }
-            if (!m_chromaShader) {
-                qWarning() << "AutoHDR Effect: failed to compile chroma guidance shader";
-            }
-        }
-
-        if (!m_neutralChromaTexture) {
-            m_neutralChromaTexture = GLTexture::allocate(GL_RGBA16F, QSize(1, 1));
-            if (!m_neutralChromaTexture) {
-                m_neutralChromaTexture = GLTexture::allocate(GL_RGBA8, QSize(1, 1));
-            }
-            if (m_neutralChromaTexture) {
-                m_neutralChromaTexture->setFilter(GL_LINEAR);
-                m_neutralChromaTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-                // Neutral: no chroma correction; a=0.33 default colorIntensity hint.
-                const float neutral[4] = {0.0f, 0.5f, 0.5f, 0.33f};
-                m_neutralChromaTexture->bind();
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, neutral);
-                m_neutralChromaTexture->unbind();
-            }
-        }
-
-        return m_downsampleShader && m_guidanceShader && m_chromaShader && m_neutralGuidanceTexture
-            && m_neutralChromaTexture;
+        return m_downsampleShader && m_guidanceShader && m_neutralGuidanceTexture;
     }
 
     bool AutoHDREffect::ensureAiResources(OffscreenWindowData *offscreenData, const QSize &windowSize)
@@ -1032,25 +985,35 @@ namespace KWin {
         }
 
         const int scale = AutoHdr::aiGuidanceScale(m_aiQuality);
-        const QSize guidanceSize(qMax(1, windowSize.width() / scale), qMax(1, windowSize.height() / scale));
+        QSize guidanceSize(qMax(1, windowSize.width() / scale), qMax(1, windowSize.height() / scale));
+        if (useOnnxOrtReadback()) {
+            const QSize capped = capGuidanceSizeForOrt(guidanceSize);
+            if (capped != guidanceSize) {
+                if (!m_loggedOrtCapWarning) {
+                    m_loggedOrtCapWarning = true;
+                    qWarning() << "AutoHDR Effect: capping ORT guidance map to" << capped
+                               << "for performance (Quality tier on large windows)";
+                }
+                guidanceSize = capped;
+            }
+        }
         if (offscreenData->guidanceSize != guidanceSize) {
             offscreenData->downsampleTexture.reset();
             offscreenData->downsampleFbo.reset();
             offscreenData->guidanceTexture.reset();
             offscreenData->guidanceFbo.reset();
-            offscreenData->chromaTexture.reset();
-            offscreenData->chromaFbo.reset();
             offscreenData->guidanceValid = false;
-            offscreenData->chromaValid = false;
+            offscreenData->guidanceEverUploaded = false;
             offscreenData->needsGuidanceUpdate = true;
-            offscreenData->needsChromaUpdate = true;
             offscreenData->guidanceSize = guidanceSize;
         }
 
         if (!offscreenData->downsampleTexture) {
             offscreenData->downsampleTexture = GLTexture::allocate(GL_RGBA16F, guidanceSize);
+            offscreenData->downsampleFloat = static_cast<bool>(offscreenData->downsampleTexture);
             if (!offscreenData->downsampleTexture) {
                 offscreenData->downsampleTexture = GLTexture::allocate(GL_RGBA8, guidanceSize);
+                offscreenData->downsampleFloat = false;
             }
             if (!offscreenData->downsampleTexture) {
                 return false;
@@ -1072,19 +1035,6 @@ namespace KWin {
             offscreenData->guidanceTexture->setFilter(GL_LINEAR);
             offscreenData->guidanceTexture->setWrapMode(GL_CLAMP_TO_EDGE);
             offscreenData->guidanceFbo = std::make_unique<GLFramebuffer>(offscreenData->guidanceTexture.get());
-        }
-
-        if (!offscreenData->chromaTexture) {
-            offscreenData->chromaTexture = GLTexture::allocate(GL_RGBA16F, guidanceSize);
-            if (!offscreenData->chromaTexture) {
-                offscreenData->chromaTexture = GLTexture::allocate(GL_RGBA8, guidanceSize);
-            }
-            if (!offscreenData->chromaTexture) {
-                return false;
-            }
-            offscreenData->chromaTexture->setFilter(GL_LINEAR);
-            offscreenData->chromaTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-            offscreenData->chromaFbo = std::make_unique<GLFramebuffer>(offscreenData->chromaTexture.get());
         }
 
         return true;
@@ -1154,91 +1104,71 @@ namespace KWin {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, rgba);
         offscreenData->guidanceTexture->unbind();
         offscreenData->guidanceValid = true;
+        offscreenData->guidanceEverUploaded = true;
     }
 
-    void AutoHDREffect::uploadChromaTexture(OffscreenWindowData *offscreenData, const float *rgba, int width,
-                                            int height)
+    bool AutoHDREffect::readDownsampleRgb(OffscreenWindowData *offscreenData, int mapW, int mapH)
     {
-        if (!offscreenData || !offscreenData->chromaTexture || !rgba || width <= 0 || height <= 0) {
-            return;
-        }
-        offscreenData->chromaTexture->bind();
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, rgba);
-        offscreenData->chromaTexture->unbind();
-        offscreenData->chromaValid = true;
-    }
-
-    void AutoHDREffect::updateChromaMap(EffectWindow *window, OffscreenWindowData *offscreenData,
-                                        const CalibrationSettings &settings)
-    {
-        Q_UNUSED(window)
-        if (!offscreenData || !offscreenData->texture || !shouldUseAiChroma(settings)) {
-            return;
+        if (!offscreenData || !offscreenData->downsampleFbo || mapW <= 0 || mapH <= 0) {
+            return false;
         }
 
-        const QSize windowSize = offscreenData->texture->size();
-        if (windowSize.width() < 32 || windowSize.height() < 32) {
-            return;
-        }
-        if (!ensureAiResources(offscreenData, windowSize)) {
-            return;
-        }
+        GLFramebuffer::pushFramebuffer(offscreenData->downsampleFbo.get());
+        const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
+        m_downsampleReadback.resize(pixelCount * 3);
 
-        const int interval = AutoHdr::aiInferenceInterval(m_aiQuality);
-        offscreenData->inferenceFrameCounter =
-            (offscreenData->inferenceFrameCounter + 1) % qMax(interval, 1);
-        if (offscreenData->chromaValid && !offscreenData->needsChromaUpdate
-            && offscreenData->inferenceFrameCounter != 0) {
-            return;
-        }
-
-        const QSize guidanceSize = offscreenData->guidanceSize;
-        const int mapW = guidanceSize.width();
-        const int mapH = guidanceSize.height();
-        const bool fullMap = guidanceSize == windowSize;
-
-        GLTexture *analysisSource = offscreenData->texture.get();
-        const bool needDownsample = !fullMap || useChromaOnnxOrtReadback();
-        if (needDownsample) {
-            renderTexturePass(offscreenData->texture.get(), offscreenData->downsampleFbo.get(),
-                              m_downsampleShader.get(), guidanceSize, mapW, mapH);
-            analysisSource = offscreenData->downsampleTexture.get();
-        }
-
-        if (useChromaOnnxOrtReadback() && offscreenData->downsampleFbo) {
-            GLFramebuffer::pushFramebuffer(offscreenData->downsampleFbo.get());
-            const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
+        const bool floatReadback =
+            offscreenData->downsampleFloat || captureInternalFormat() == GL_RGBA16F;
+        if (floatReadback) {
+            m_downsampleReadbackFloat.resize(pixelCount * 4);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_FLOAT, m_downsampleReadbackFloat.data());
+            for (size_t i = 0; i < pixelCount; ++i) {
+                m_downsampleReadback[i * 3 + 0] = m_downsampleReadbackFloat[i * 4 + 0];
+                m_downsampleReadback[i * 3 + 1] = m_downsampleReadbackFloat[i * 4 + 1];
+                m_downsampleReadback[i * 3 + 2] = m_downsampleReadbackFloat[i * 4 + 2];
+            }
+        } else {
+            if (!m_loggedOrtUbyteWarning) {
+                m_loggedOrtUbyteWarning = true;
+                qWarning() << "AutoHDR Effect: ONNX readback using 8-bit pixels; enable float FBO for best results";
+            }
             m_downsampleUbyte.resize(pixelCount * 4);
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_UNSIGNED_BYTE, m_downsampleUbyte.data());
-            GLFramebuffer::popFramebuffer();
-
-            m_downsampleReadback.resize(pixelCount * 3);
             for (size_t i = 0; i < pixelCount; ++i) {
                 m_downsampleReadback[i * 3 + 0] = m_downsampleUbyte[i * 4 + 0] * (1.0f / 255.0f);
                 m_downsampleReadback[i * 3 + 1] = m_downsampleUbyte[i * 4 + 1] * (1.0f / 255.0f);
                 m_downsampleReadback[i * 3 + 2] = m_downsampleUbyte[i * 4 + 2] * (1.0f / 255.0f);
             }
+        }
+        GLFramebuffer::popFramebuffer();
+        return true;
+    }
 
-            m_chromaUpload.resize(pixelCount * 4);
-            if (m_chromaInference->run(m_downsampleReadback.data(), mapW, mapH, m_chromaUpload.data())) {
-                uploadChromaTexture(offscreenData, m_chromaUpload.data(), mapW, mapH);
-                offscreenData->needsChromaUpdate = false;
-                if (!m_loggedChromaBackend) {
-                    m_loggedChromaBackend = true;
-                    qInfo() << "AutoHDR Effect: AI chroma active via" << activeChromaBackendLabel();
-                }
-                return;
-            }
+    bool AutoHDREffect::readGuidanceMapRgba(OffscreenWindowData *offscreenData, int mapW, int mapH,
+                                            std::vector<float> &rgba)
+    {
+        if (!offscreenData || !offscreenData->guidanceFbo || mapW <= 0 || mapH <= 0) {
+            return false;
         }
 
-        renderTexturePass(analysisSource, offscreenData->chromaFbo.get(), m_chromaShader.get(), guidanceSize, mapW,
-                          mapH);
-        offscreenData->chromaValid = true;
-        offscreenData->needsChromaUpdate = false;
-        if (!m_loggedChromaBackend) {
-            m_loggedChromaBackend = true;
-            qInfo() << "AutoHDR Effect: AI chroma active via" << activeChromaBackendLabel();
+        GLFramebuffer::pushFramebuffer(offscreenData->guidanceFbo.get());
+        const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
+        rgba.resize(pixelCount * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_FLOAT, rgba.data());
+        GLFramebuffer::popFramebuffer();
+        return true;
+    }
+
+    void AutoHDREffect::blendGuidanceWithGlslFloor(std::vector<float> &rgba) const
+    {
+        if (m_glslGuidanceFloor.size() != rgba.size()) {
+            return;
+        }
+        for (size_t i = 0; i < rgba.size() / 4; ++i) {
+            rgba[i * 4 + 3] = std::max(rgba[i * 4 + 3], m_glslGuidanceFloor[i * 4 + 3]);
         }
     }
 
@@ -1258,9 +1188,11 @@ namespace KWin {
             return;
         }
 
-        if (offscreenData->guidanceValid && !offscreenData->needsGuidanceUpdate
-            && offscreenData->inferenceFrameCounter != 0) {
-            return;
+        if (offscreenData->guidanceValid && !offscreenData->needsGuidanceUpdate) {
+            const int staticInterval = AutoHdr::aiInferenceInterval(m_aiQuality);
+            if (staticInterval <= 1 || (m_guidanceFrameCounter % staticInterval) != 0) {
+                return;
+            }
         }
 
         const QSize guidanceSize = offscreenData->guidanceSize;
@@ -1271,48 +1203,53 @@ namespace KWin {
         GLTexture *analysisSource = offscreenData->texture.get();
         const bool needDownsample = !fullMap || useOnnxOrtReadback();
         if (needDownsample) {
-            // Cheap 1-tap downsample to map resolution (also feeds ORT readback).
             renderTexturePass(offscreenData->texture.get(), offscreenData->downsampleFbo.get(),
                               m_downsampleShader.get(), guidanceSize, mapW, mapH);
             analysisSource = offscreenData->downsampleTexture.get();
         }
 
-        // Forced ORT path: ubyte readback + session run (slow; for non-v0 models).
-        if (useOnnxOrtReadback() && offscreenData->downsampleFbo) {
-            GLFramebuffer::pushFramebuffer(offscreenData->downsampleFbo.get());
-            const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
-            m_downsampleUbyte.resize(pixelCount * 4);
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_UNSIGNED_BYTE, m_downsampleUbyte.data());
-            GLFramebuffer::popFramebuffer();
-
-            m_downsampleReadback.resize(pixelCount * 3);
-            for (size_t i = 0; i < pixelCount; ++i) {
-                m_downsampleReadback[i * 3 + 0] = m_downsampleUbyte[i * 4 + 0] * (1.0f / 255.0f);
-                m_downsampleReadback[i * 3 + 1] = m_downsampleUbyte[i * 4 + 1] * (1.0f / 255.0f);
-                m_downsampleReadback[i * 3 + 2] = m_downsampleUbyte[i * 4 + 2] * (1.0f / 255.0f);
-            }
-
-            m_guidanceUpload.resize(pixelCount * 4);
-            if (m_guidanceInference->run(m_downsampleReadback.data(), mapW, mapH, m_guidanceUpload.data())) {
-                uploadGuidanceTexture(offscreenData, m_guidanceUpload.data(), mapW, mapH);
-                offscreenData->needsGuidanceUpdate = false;
-                if (!m_loggedGuidanceBackend) {
-                    m_loggedGuidanceBackend = true;
-                    qInfo() << "AutoHDR Effect: AI guidance active via" << activeGuidanceBackendLabel();
-                }
-                return;
-            }
-        }
-
-        // GLSL / onnx-style-gpu: ONNX v0 formula on the GPU (no readback).
+        // GLSL v1.5 bootstrap: always produce a valid guidance map this frame.
         renderTexturePass(analysisSource, offscreenData->guidanceFbo.get(), m_guidanceShader.get(), guidanceSize,
                           mapW, mapH);
         offscreenData->guidanceValid = true;
+        offscreenData->guidanceEverUploaded = true;
         offscreenData->needsGuidanceUpdate = false;
+
         if (!m_loggedGuidanceBackend) {
             m_loggedGuidanceBackend = true;
             qInfo() << "AutoHDR Effect: AI guidance active via" << activeGuidanceBackendLabel();
+        }
+
+        // Optional v2 async ORT refinement (GLSL map remains visible while pending).
+        if (useAsyncGuidanceInference() && m_guidanceWorker && offscreenData->downsampleFbo) {
+            if (m_guidanceAsyncPending) {
+                return;
+            }
+            if (!readDownsampleRgb(offscreenData, mapW, mapH)) {
+                return;
+            }
+            readGuidanceMapRgba(offscreenData, mapW, mapH, m_glslGuidanceFloor);
+            m_guidanceWorker->submit(m_downsampleReadback.data(), mapW, mapH);
+            m_guidanceAsyncPending = true;
+            m_asyncGuidanceTarget = offscreenData;
+            return;
+        }
+
+        // Sync ORT readback (AUTOHDR_ONNX_FORCE_ORT or non-v2 models).
+        if (useOnnxOrtReadback() && offscreenData->downsampleFbo) {
+            if (!readDownsampleRgb(offscreenData, mapW, mapH)) {
+                return;
+            }
+
+            const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
+            m_guidanceUpload.resize(pixelCount * 4);
+            if (m_guidanceInference->run(m_downsampleReadback.data(), mapW, mapH, m_guidanceUpload.data())) {
+                readGuidanceMapRgba(offscreenData, mapW, mapH, m_glslGuidanceFloor);
+                blendGuidanceWithGlslFloor(m_guidanceUpload);
+                uploadGuidanceTexture(offscreenData, m_guidanceUpload.data(), mapW, mapH);
+                return;
+            }
+            qWarning() << "AutoHDR Effect: ONNX guidance failed; keeping GLSL formula map";
         }
     }
 
@@ -1546,16 +1483,11 @@ namespace KWin {
             offscreenData->fbo = std::make_unique<GLFramebuffer>(offscreenData->texture.get());
             offscreenData->isDirty = true;
             offscreenData->guidanceValid = false;
-            offscreenData->chromaValid = false;
             offscreenData->needsGuidanceUpdate = true;
-            offscreenData->needsChromaUpdate = true;
-            offscreenData->inferenceFrameCounter = 0;
             offscreenData->downsampleTexture.reset();
             offscreenData->downsampleFbo.reset();
             offscreenData->guidanceTexture.reset();
             offscreenData->guidanceFbo.reset();
-            offscreenData->chromaTexture.reset();
-            offscreenData->chromaFbo.reset();
             offscreenData->guidanceSize = QSize();
         }
 
@@ -1578,8 +1510,6 @@ namespace KWin {
         GLFramebuffer::popFramebuffer();
         offscreenData->isDirty = false;
         offscreenData->needsGuidanceUpdate = true;
-        offscreenData->needsChromaUpdate = true;
-        offscreenData->inferenceFrameCounter = 0;
     }
 
     void AutoHDREffect::paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
@@ -1599,9 +1529,6 @@ namespace KWin {
         const CalibrationSettings settings = m_activeWindows.value(window, m_globalDefaults);
         if (shouldUseAi(settings)) {
             updateGuidanceMap(window, offscreenData, settings);
-        }
-        if (shouldUseAiChroma(settings)) {
-            updateChromaMap(window, offscreenData, settings);
         }
 
         ShaderBinder binder(shader);
@@ -1652,8 +1579,13 @@ namespace KWin {
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         GLTexture *guidanceTexture = m_neutralGuidanceTexture.get();
-        if (shouldUseAi(settings) && offscreenData->guidanceTexture && offscreenData->guidanceValid) {
+        const bool hasGuidanceMap = shouldUseAi(settings) && offscreenData->guidanceTexture
+            && (offscreenData->guidanceValid || offscreenData->guidanceEverUploaded);
+        if (hasGuidanceMap) {
             guidanceTexture = offscreenData->guidanceTexture.get();
+        } else if (shouldUseAi(settings) && !m_loggedNeutralGuidance) {
+            m_loggedNeutralGuidance = true;
+            qWarning() << "AutoHDR Effect: AI guidance not ready, using neutral map";
         }
         if (guidanceTexture) {
             glActiveTexture(GL_TEXTURE1);
@@ -1661,25 +1593,9 @@ namespace KWin {
             glActiveTexture(GL_TEXTURE0);
         }
 
-        GLTexture *chromaTexture = m_neutralChromaTexture.get();
-        if (shouldUseAiChroma(settings) && offscreenData->chromaTexture && offscreenData->chromaValid) {
-            chromaTexture = offscreenData->chromaTexture.get();
-        }
-        if (chromaTexture) {
-            glActiveTexture(GL_TEXTURE2);
-            chromaTexture->bind();
-            glActiveTexture(GL_TEXTURE0);
-        }
-
         offscreenData->texture->bind();
         vbo->draw(clipRegion, GL_TRIANGLES, 0, geometry.count(), clipping);
         offscreenData->texture->unbind();
-
-        if (chromaTexture) {
-            glActiveTexture(GL_TEXTURE2);
-            chromaTexture->unbind();
-            glActiveTexture(GL_TEXTURE0);
-        }
 
         if (guidanceTexture) {
             glActiveTexture(GL_TEXTURE1);
@@ -1840,6 +1756,7 @@ namespace KWin {
 
     void AutoHDREffect::prePaintScreen(ScreenPrePaintData &data)
     {
+        pollAsyncGuidanceResults();
         m_currentPaintOutput = data.screen;
         if (!m_currentPaintOutput && data.view) {
             m_currentPaintOutput = data.view->logicalOutput();
@@ -1849,6 +1766,7 @@ namespace KWin {
 
     void AutoHDREffect::postPaintScreen()
     {
+        ++m_guidanceFrameCounter;
         m_currentPaintOutput = nullptr;
         effects->postPaintScreen();
     }

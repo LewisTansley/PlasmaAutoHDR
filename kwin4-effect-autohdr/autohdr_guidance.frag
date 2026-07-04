@@ -5,7 +5,7 @@
 //   R = highlight expansion (>=1)
 //   G = highlight confidence / shoulder-detail mask [0,1]
 //   B = shadow detail mask [0,1]
-//   A = depth / local-contrast mask [0,1]
+//   A = bandMask — midtone ramp debanding [0,1]
 
 uniform sampler2D sampler;
 uniform int textureWidth;
@@ -75,9 +75,7 @@ void main()
     float highlightLift = clamp((centerLuma - 0.45) / 0.53, 0.0, 1.0);
     float shoulderBand = smoothstep(0.85, 0.95, centerLuma);
     float shoulderDetail = shoulderBand * flatness;
-    float highlightFine = max(highlightConf, shoulderDetail * 0.85);
-    float shoulderFine = shoulderBand * flatness * 1.1;
-    float confidence = max(highlightFine, shoulderFine);
+    float confidence = max(highlightConf, shoulderDetail * 0.85);
     float expansion = 1.0 + confidence * highlightLift * 0.75;
 
     // --- Shadow detail mask (core + transition band) ---
@@ -90,10 +88,13 @@ void main()
     float shadowSoft = mix(1.0, softEdge, 0.35);
     float shadowMask = shadowRegion * max(flatness, max(lowVar * 0.85, mildGrad * 1.15)) * shadowSoft;
 
-    // --- Depth / local-contrast mask (prefer quantized ramps over noisy skin) ---
-    float midRegion = smoothstep(0.10, 0.20, centerLuma) * (1.0 - smoothstep(0.72, 0.88, centerLuma));
-    float mildVar = smoothstep(0.0, 0.0008, variance) * (1.0 - smoothstep(0.003, 0.012, variance));
-    float depthMask = midRegion * max(mildVar, mildGrad * 0.5) * softEdge * 0.65;
+    // --- Banding mask: shadow + midtone + shoulder ramps ---
+    float rampGrad = smoothstep(0.003, 0.025, grad) * (1.0 - smoothstep(0.08, 0.18, grad));
+    float shadowBand = (1.0 - smoothstep(0.0, 0.12, centerLuma)) * rampGrad;
+    float midBand = smoothstep(0.05, 0.15, centerLuma) * (1.0 - smoothstep(0.70, 0.88, centerLuma));
+    float shoulderBandMask = smoothstep(0.82, 0.94, centerLuma) * flatness * (1.0 - smoothstep(0.08, 0.18, grad));
+    float regionBand = max(shadowBand, max(midBand, shoulderBandMask * 0.75));
+    float bandMask = regionBand * max(flatness, rampGrad * 0.7) * softEdge;
 
     // --- UI suppress ---
     // flatPanel matches sky/specular interiors as well as UI chrome; do NOT apply it to
@@ -112,11 +113,11 @@ void main()
     expansion = mix(1.0, expansion, textKeep);
 
     shadowMask *= detailKeep;
-    depthMask *= detailKeep;
+    bandMask *= detailKeep;
 
     fragColor = vec4(
         clamp(expansion, 1.0, 1.75),
         clamp(confidence, 0.0, 1.0),
         clamp(shadowMask, 0.0, 1.0),
-        clamp(depthMask, 0.0, 1.0));
+        clamp(bandMask, 0.0, 1.0));
 }

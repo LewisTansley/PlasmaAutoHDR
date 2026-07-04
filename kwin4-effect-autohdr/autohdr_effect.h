@@ -1,6 +1,6 @@
 #pragma once
-#include "ai/chroma_inference.h"
 #include "ai/guidance_inference.h"
+#include "ai/guidance_worker.h"
 #include "autohdr_config.h"
 #include "calibration_overlay.h"
 #include "status_toast_overlay.h"
@@ -64,14 +64,11 @@ namespace KWin {
             std::unique_ptr<GLFramebuffer> downsampleFbo;
             std::unique_ptr<GLTexture> guidanceTexture;
             std::unique_ptr<GLFramebuffer> guidanceFbo;
-            std::unique_ptr<GLTexture> chromaTexture;
-            std::unique_ptr<GLFramebuffer> chromaFbo;
             bool isDirty = true;
             bool guidanceValid = false;
-            bool chromaValid = false;
+            bool guidanceEverUploaded = false;
             bool needsGuidanceUpdate = true;
-            bool needsChromaUpdate = true;
-            int inferenceFrameCounter = 0;
+            bool downsampleFloat = false;
             QSize guidanceSize;
             QMetaObject::Connection windowDamagedConnection;
             QMetaObject::Connection windowExpandedGeometryConnection;
@@ -102,28 +99,25 @@ namespace KWin {
         bool ensureAiResources(OffscreenWindowData *offscreenData, const QSize &windowSize);
         void updateGuidanceMap(EffectWindow *window, OffscreenWindowData *offscreenData,
                                const CalibrationSettings &settings);
-        void updateChromaMap(EffectWindow *window, OffscreenWindowData *offscreenData,
-                             const CalibrationSettings &settings);
         void renderTexturePass(GLTexture *source, GLFramebuffer *target, GLShader *shader,
                                const QSize &targetSize, int sourceWidth, int sourceHeight);
         void uploadGuidanceTexture(OffscreenWindowData *offscreenData, const float *rgba, int width, int height);
-        void uploadChromaTexture(OffscreenWindowData *offscreenData, const float *rgba, int width, int height);
+        bool readDownsampleRgb(OffscreenWindowData *offscreenData, int mapW, int mapH);
+        bool readGuidanceMapRgba(OffscreenWindowData *offscreenData, int mapW, int mapH, std::vector<float> &rgba);
+        void blendGuidanceWithGlslFloor(std::vector<float> &rgba) const;
         bool shouldUseAi(const CalibrationSettings &settings) const;
-        bool shouldUseAiChroma(const CalibrationSettings &settings) const;
         bool preferOnnxGuidance() const;
         bool useOnnxGpuFastPath() const;
         bool useOnnxOrtReadback() const;
-        bool useChromaOnnxGpuFastPath() const;
-        bool useChromaOnnxOrtReadback() const;
+        bool useAsyncGuidanceInference() const;
+        bool isGuidanceV2Model(const QString &modelPath) const;
+        QSize capGuidanceSizeForOrt(const QSize &size) const;
+        void pollAsyncGuidanceResults();
         void initGuidanceInference();
-        void initChromaInference();
         void invalidateAllGuidance();
-        void invalidateAllChroma();
         QString activeGuidanceBackendLabel() const;
-        QString activeChromaBackendLabel() const;
         QString enabledStatusMessage(const CalibrationSettings &settings) const;
         QString resolveOnnxModelPath() const;
-        QString resolveChromaModelPath() const;
         GLenum captureInternalFormat() const;
         bool activateWindow(EffectWindow *window, const CalibrationSettings &settings);
         void scheduleUnredirect(EffectWindow *window);
@@ -232,11 +226,9 @@ namespace KWin {
         int m_locAntiAliasingQuality = -1;
         int m_locEnableSpatialAvgPreCurve = -1;
         int m_locGuidanceMap = -1;
-        int m_locChromaMap = -1;
         int m_locAiStrength = -1;
-        int m_locAiChromaStrength = -1;
         int m_locAiEnhanced = -1;
-        int m_locAiChromaEnabled = -1;
+        int m_locAiBandingStrength = -1;
 
         float m_toneCurveLut[AutoHdr::kToneCurveLutSize] = {};
         float m_toneCurveSlopeLut[AutoHdr::kToneCurveLutSize] = {};
@@ -259,31 +251,33 @@ namespace KWin {
         QDateTime m_shaderFragMtime;
         QDateTime m_shaderColorMtime;
         QDateTime m_shaderPerceptualMtime;
-        QDateTime m_shaderChromaMtime;
 
         std::unique_ptr<GLShader> m_downsampleShader;
         std::unique_ptr<GLShader> m_guidanceShader;
-        std::unique_ptr<GLShader> m_chromaShader;
         std::unique_ptr<GLTexture> m_neutralGuidanceTexture;
-        std::unique_ptr<GLTexture> m_neutralChromaTexture;
         std::unique_ptr<AutoHdr::GuidanceInference> m_guidanceInference;
-        std::unique_ptr<AutoHdr::ChromaInference> m_chromaInference;
+        std::unique_ptr<AutoHdr::GuidanceWorker> m_guidanceWorker;
         QString m_guidanceBackendName;
-        QString m_chromaBackendName;
+        bool m_guidanceAsyncPending = false;
+        OffscreenWindowData *m_asyncGuidanceTarget = nullptr;
+        bool m_loggedOrtCapWarning = false;
         bool m_aiEnabledGlobal = false;
         float m_aiStrengthGlobal = 0.5f;
-        bool m_aiChromaEnabledGlobal = false;
-        float m_aiChromaStrengthGlobal = 0.5f;
+        float m_aiBandingStrengthGlobal = 0.7f;
         AutoHdr::AiQuality m_aiQuality = AutoHdr::AiQuality::Balanced;
         AutoHdr::AiBackend m_aiBackend = AutoHdr::AiBackend::Auto;
         bool m_aiForceDisabled = false;
-        bool m_aiChromaForceDisabled = false;
         bool m_loggedGuidanceBackend = false;
-        bool m_loggedChromaBackend = false;
+        bool m_loggedNeutralGuidance = false;
+        bool m_loggedAsyncFailure = false;
+        bool m_loggedV2Active = false;
+        bool m_loggedOrtUbyteWarning = false;
+        int m_guidanceFrameCounter = 0;
         std::vector<float> m_downsampleReadback;
+        std::vector<float> m_downsampleReadbackFloat;
         std::vector<unsigned char> m_downsampleUbyte;
         std::vector<float> m_guidanceUpload;
-        std::vector<float> m_chromaUpload;
+        std::vector<float> m_glslGuidanceFloor;
     };
 
 } // namespace KWin

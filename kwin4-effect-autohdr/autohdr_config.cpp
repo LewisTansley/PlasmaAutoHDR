@@ -49,7 +49,7 @@ float clampAiStrength(float value)
     return qBound(0.0f, value, 1.0f);
 }
 
-float clampAiChromaStrength(float value)
+float clampAiBandingStrength(float value)
 {
     return qBound(0.0f, value, 1.0f);
 }
@@ -81,12 +81,12 @@ int aiInferenceInterval(AiQuality quality)
 {
     switch (quality) {
     case AiQuality::Performance:
-        return 3;
+        // Periodic refresh on static content; damaged windows update every frame.
+        return 2;
     case AiQuality::Quality:
-        return 1;
     case AiQuality::Balanced:
     default:
-        return 2;
+        return 1;
     }
 }
 
@@ -264,8 +264,7 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     general.aiStrength = clampAiStrength(group.readEntry("AiStrength", 0.5f));
     general.aiQuality = aiQualityFromString(group.readEntry("AiQuality", QStringLiteral("Balanced")));
     general.aiBackend = aiBackendFromString(group.readEntry("AiBackend", QStringLiteral("Auto")));
-    general.aiChromaEnabled = group.readEntry("AiChromaEnabled", false);
-    general.aiChromaStrength = clampAiChromaStrength(group.readEntry("AiChromaStrength", 0.5f));
+    general.aiBandingStrength = clampAiBandingStrength(group.readEntry("AiBandingStrength", 0.7f));
     return general;
 }
 
@@ -281,8 +280,7 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("AiStrength", general.aiStrength);
     group.writeEntry("AiQuality", aiQualityToString(general.aiQuality));
     group.writeEntry("AiBackend", aiBackendToString(general.aiBackend));
-    group.writeEntry("AiChromaEnabled", general.aiChromaEnabled);
-    group.writeEntry("AiChromaStrength", general.aiChromaStrength);
+    group.writeEntry("AiBandingStrength", general.aiBandingStrength);
     config->sync();
 }
 
@@ -295,8 +293,6 @@ void readCalibrationFromGroup(const KConfigGroup &group, CalibrationSettings &se
     settings.colorIntensity = group.readEntry("ColorIntensity", 0.33f);
     settings.aiEnhanced = group.readEntry("AiEnhanced", false);
     settings.aiStrength = clampAiStrength(group.readEntry("AiStrength", 0.5f));
-    settings.aiChromaEnabled = group.readEntry("AiChromaEnabled", false);
-    settings.aiChromaStrength = clampAiChromaStrength(group.readEntry("AiChromaStrength", 0.5f));
 
     const float legacyMidPoint = migrateMidPoint(static_cast<float>(group.readEntry("MidPoint", 203)));
     settings.toneCurvePoints = parseToneCurvePoints(group.readEntry("ToneCurvePoints", QString()));
@@ -338,8 +334,6 @@ void writeCalibrationToGroup(KConfigGroup &group, const CalibrationSettings &set
     group.writeEntry("ColorIntensity", settings.colorIntensity);
     group.writeEntry("AiEnhanced", settings.aiEnhanced);
     group.writeEntry("AiStrength", settings.aiStrength);
-    group.writeEntry("AiChromaEnabled", settings.aiChromaEnabled);
-    group.writeEntry("AiChromaStrength", settings.aiChromaStrength);
     group.writeEntry("ReferenceNits", qRound(settings.referenceNits));
     group.writeEntry("SdrMaxPoint", formatSdrMaxPoint(settings.sdrMaxPoint));
     group.writeEntry("ToneCurvePoints", formatToneCurvePoints(settings.toneCurvePoints));
@@ -457,7 +451,6 @@ void sanitizeCalibrationSettings(CalibrationSettings &settings, float referenceN
     settings.blackPoint = clampBlackPoint(settings.blackPoint);
     settings.gamutExpansion = clampGamutExpansion(settings.gamutExpansion);
     settings.aiStrength = clampAiStrength(settings.aiStrength);
-    settings.aiChromaStrength = clampAiChromaStrength(settings.aiChromaStrength);
 
     const float peakNits = qMin(settings.maxNits, maxDisplayNits);
     settings.maxNits = peakNits;

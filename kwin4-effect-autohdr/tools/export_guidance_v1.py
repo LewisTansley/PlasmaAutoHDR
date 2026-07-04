@@ -6,7 +6,7 @@ Output: float32 NCHW [1, 4, H, W]:
   R = highlight expansion (>=1)
   G = highlight confidence / shoulder-detail mask [0,1]
   B = shadow detail mask [0,1]
-  A = depth / local-contrast mask [0,1]
+  A = bandMask — midtone ramp debanding [0,1]
 
 Per-pixel approximation of autohdr_guidance.frag (no neighborhood stats).
 The default runtime path runs the full spatial formula on the GPU (onnx-style-gpu).
@@ -16,7 +16,8 @@ Keep highlight R/G in sync with the non-spatial terms in autohdr_guidance.frag:
   highlight_lift = saturate((luma - 0.45) / 0.53)
   expansion      = 1 + confidence * highlight_lift * 0.75
   shadow_mask    = saturate(1 - luma / 0.14)
-  depth_mask     = mid_region(luma)   # smoothstep band 0.12–0.88
+  band_mask      = extended mid_band(luma)  # smoothstep 0.05–0.15 × (1 - smoothstep 0.70–0.88)
+                                              # full shadow/shoulder bands are GPU-only (spatial)
 """
 
 from __future__ import annotations
@@ -57,10 +58,10 @@ def build_model():
         c("c_053", 0.53),
         c("c_075", 0.75),
         c("c_014", 0.14),
-        c("c_012", 0.12),
-        c("c_022", 0.22),
-        c("c_072", 0.72),
-        c("c_088", 0.88),
+        c("c_008", 0.05),
+        c("c_018", 0.15),
+        c("c_065", 0.70),
+        c("c_082", 0.88),
         c("c_one", 1.0),
         c("c_zero", 0.0),
         # confidence = clip((luma - 0.55) / 0.40, 0, 1)
@@ -79,31 +80,30 @@ def build_model():
         helper.make_node("Div", ["luma", "c_014"], ["shadow_u"]),
         helper.make_node("Sub", ["c_one", "shadow_u"], ["shadow_raw"]),
         helper.make_node("Clip", ["shadow_raw", "c_zero", "c_one"], ["shadow_mask"]),
-        # depth_mask = smoothstep(0.12,0.22,luma) * (1 - smoothstep(0.72,0.88,luma))
-        # smoothstep(e0,e1,x) = t*t*(3-2*t), t=clip((x-e0)/(e1-e0),0,1)
-        helper.make_node("Sub", ["luma", "c_012"], ["lo_num"]),
-        helper.make_node("Sub", ["c_022", "c_012"], ["lo_den"]),
-        helper.make_node("Div", ["lo_num", "lo_den"], ["lo_t_raw"]),
-        helper.make_node("Clip", ["lo_t_raw", "c_zero", "c_one"], ["lo_t"]),
-        helper.make_node("Mul", ["lo_t", "lo_t"], ["lo_t2"]),
+        # band_mask = smoothstep(0.05,0.15,luma) * (1 - smoothstep(0.70,0.88,luma))
+        helper.make_node("Sub", ["luma", "c_008"], ["band_lo_num"]),
+        helper.make_node("Sub", ["c_018", "c_008"], ["band_lo_den"]),
+        helper.make_node("Div", ["band_lo_num", "band_lo_den"], ["band_lo_t_raw"]),
+        helper.make_node("Clip", ["band_lo_t_raw", "c_zero", "c_one"], ["band_lo_t"]),
+        helper.make_node("Mul", ["band_lo_t", "band_lo_t"], ["band_lo_t2"]),
         c("c_two", 2.0),
         c("c_three", 3.0),
-        helper.make_node("Mul", ["c_two", "lo_t"], ["lo_2t"]),
-        helper.make_node("Sub", ["c_three", "lo_2t"], ["lo_poly"]),
-        helper.make_node("Mul", ["lo_t2", "lo_poly"], ["lo_s"]),
-        helper.make_node("Sub", ["luma", "c_072"], ["hi_num"]),
-        helper.make_node("Sub", ["c_088", "c_072"], ["hi_den"]),
-        helper.make_node("Div", ["hi_num", "hi_den"], ["hi_t_raw"]),
-        helper.make_node("Clip", ["hi_t_raw", "c_zero", "c_one"], ["hi_t"]),
-        helper.make_node("Mul", ["hi_t", "hi_t"], ["hi_t2"]),
-        helper.make_node("Mul", ["c_two", "hi_t"], ["hi_2t"]),
-        helper.make_node("Sub", ["c_three", "hi_2t"], ["hi_poly"]),
-        helper.make_node("Mul", ["hi_t2", "hi_poly"], ["hi_s"]),
-        helper.make_node("Sub", ["c_one", "hi_s"], ["hi_keep"]),
-        helper.make_node("Mul", ["lo_s", "hi_keep"], ["depth_mask"]),
+        helper.make_node("Mul", ["c_two", "band_lo_t"], ["band_lo_2t"]),
+        helper.make_node("Sub", ["c_three", "band_lo_2t"], ["band_lo_poly"]),
+        helper.make_node("Mul", ["band_lo_t2", "band_lo_poly"], ["band_lo_s"]),
+        helper.make_node("Sub", ["luma", "c_065"], ["band_hi_num"]),
+        helper.make_node("Sub", ["c_082", "c_065"], ["band_hi_den"]),
+        helper.make_node("Div", ["band_hi_num", "band_hi_den"], ["band_hi_t_raw"]),
+        helper.make_node("Clip", ["band_hi_t_raw", "c_zero", "c_one"], ["band_hi_t"]),
+        helper.make_node("Mul", ["band_hi_t", "band_hi_t"], ["band_hi_t2"]),
+        helper.make_node("Mul", ["c_two", "band_hi_t"], ["band_hi_2t"]),
+        helper.make_node("Sub", ["c_three", "band_hi_2t"], ["band_hi_poly"]),
+        helper.make_node("Mul", ["band_hi_t2", "band_hi_poly"], ["band_hi_s"]),
+        helper.make_node("Sub", ["c_one", "band_hi_s"], ["band_hi_keep"]),
+        helper.make_node("Mul", ["band_lo_s", "band_hi_keep"], ["band_mask"]),
         helper.make_node(
             "Concat",
-            ["expansion", "confidence", "shadow_mask", "depth_mask"],
+            ["expansion", "confidence", "shadow_mask", "band_mask"],
             ["output"],
             axis=1,
         ),

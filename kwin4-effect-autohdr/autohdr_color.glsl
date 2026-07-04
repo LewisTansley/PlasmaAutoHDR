@@ -73,38 +73,11 @@ float expandHighlightDetailRel(float t)
     return mix(t, expanded, smoothstep(knee, knee + kneeWidth * 0.5, t));
 }
 
-// Reposition within neighborhood luma envelope using wide-context hint (zero net lift).
-vec3 applyRampInference(vec3 rgbNits, float refNits, float mask, float strength, float localMinNits,
-                        float localMaxNits, float localAvgNits, float wideAvgNits, float localRangeNits)
-{
-    float span = localMaxNits - localMinNits;
-    const float lsb = refNits / 255.0;
-    if (span < lsb * 0.5) {
-        return rgbNits;
-    }
-
-    float w = clamp(mask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
-    if (w <= 1e-4) {
-        return rgbNits;
-    }
-
-    float luma = max(luminanceYNits(rgbNits), 1e-6);
-    float pos = clamp((luma - localMinNits) / span, 0.0, 1.0);
-    float widePos = clamp((wideAvgNits - localMinNits) / span, 0.0, 1.0);
-    float rangeRel = localRangeNits / max(refNits, 1.0);
-    float rampGate = smoothstep(0.5 * lsb, 1.0 * lsb, rangeRel)
-        * (1.0 - smoothstep(2.5 * lsb, 4.0 * lsb, rangeRel));
-
-    float inferredPos = mix(pos, mix(pos, widePos, 0.4), w * rampGate);
-    float newLuma = clamp(localMinNits + inferredPos * span, localMinNits, localMaxNits);
-    return rgbNits * (newLuma / luma);
-}
-
 // Reconstruct smooth ramps under 8-bit quantization steps (mean-preserving).
 vec3 applyDecontour(vec3 rgbNits, float refNits, float mask, float strength, float wideAvgNits,
-                    float localRangeNits, float localAvgNits, float shadowWeight, float highlightWeight)
+                    float localRangeNits, float localAvgNits, float shadowWeight, float bandMask)
 {
-    float w = clamp(mask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    float w = max(clamp(mask, 0.0, 1.0), clamp(bandMask, 0.0, 1.0) * 0.85) * clamp(strength, 0.0, 1.0);
     if (w <= 1e-4 || wideAvgNits <= 0.0) {
         return rgbNits;
     }
@@ -116,20 +89,23 @@ vec3 applyDecontour(vec3 rgbNits, float refNits, float mask, float strength, flo
     float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
         * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
     float plateau = 1.0 - smoothstep(0.0, 0.75 * lsb, rangeRel);
-    float decontourW = max(rampBand, plateau * 0.65) * w;
+    float bandMaskClamped = clamp(bandMask, 0.0, 1.0);
+    float plateauScale = bandMaskClamped > 0.4 ? 0.85 : 0.65;
+    float decontourW = max(rampBand, plateau * plateauScale) * w;
 
     float t = luma / max(refNits, 1.0);
     float crushed = 1.0 - smoothstep(0.05, 0.22, t);
-    float shoulder = smoothstep(0.82, 0.96, t);
-    float regionBlend = max(
-        mix(0.40, 0.62, clamp(shadowWeight, 0.0, 1.0) * crushed),
-        mix(0.35, 0.55, clamp(highlightWeight, 0.0, 1.0) * shoulder));
+    float blend = bandMaskClamped > 0.4
+        ? mix(0.35, 0.70, bandMaskClamped)
+        : mix(0.35, 0.55, clamp(shadowWeight, 0.0, 1.0) * crushed);
 
+    // Nudge deviation using wide-local context — never blend absolute luma toward wideAvg (that lifts blacks).
     float dev = luma - avg;
     float wideDev = wideAvgNits - avg;
+    float hintScale = bandMaskClamped > 0.4 ? 0.75 : 0.5;
     float hint = sign(wideDev != 0.0 ? wideDev : dev)
         * min(abs(wideDev), max(localRangeNits * 0.45, refNits * lsb));
-    float targetDev = mix(dev, dev + hint * 0.65, decontourW * regionBlend);
+    float targetDev = mix(dev, dev + hint * hintScale, decontourW * blend);
     float newLuma = max(avg + targetDev, 1e-6);
     return rgbNits * (newLuma / luma);
 }
@@ -154,14 +130,12 @@ vec3 applyShadowDetail(vec3 rgbNits, float refNits, float shadowMask, float stre
     float flatGate = max(1.0 - smoothstep(1.0 * lsb, 2.5 * lsb, rangeRel), rampBand);
 
     float delta = luma - avg;
-    float gain = mix(1.0, mix(1.85, 2.35, crushed), w * flatGate);
+    float gain = mix(1.0, mix(1.7, 2.15, crushed), w * flatGate);
     float newLuma = max(avg + delta * gain, 1e-6);
     return rgbNits * (newLuma / luma);
 }
 
-// Mean-preserving highlight residual stretch (shoulder band, gated by quantization flatness).
-vec3 applyHighlightDetail(vec3 rgbNits, float refNits, float highlightMask, float strength, float localAvgNits,
-                          float localRangeNits)
+vec3 applyHighlightDetail(vec3 rgbNits, float refNits, float highlightMask, float strength)
 {
     float w = clamp(highlightMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
     if (w <= 1e-4) {
@@ -169,19 +143,13 @@ vec3 applyHighlightDetail(vec3 rgbNits, float refNits, float highlightMask, floa
     }
 
     float luma = max(luminanceYNits(rgbNits), 1e-6);
-    float avg = localAvgNits > 0.0 ? localAvgNits : luma;
     float t = luma / max(refNits, 1.0);
-    float shoulder = smoothstep(0.82, 0.96, t);
-    const float lsb = 1.0 / 255.0;
-    float rangeRel = localRangeNits / max(refNits, 1.0);
-    float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
-        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
-    float flatGate = max(1.0 - smoothstep(1.0 * lsb, 2.5 * lsb, rangeRel), rampBand);
-
-    float delta = luma - avg;
-    float gain = mix(1.0, mix(1.55, 2.0, shoulder), w * shoulder * flatGate);
-    float newLuma = max(avg + delta * gain, 1e-6);
-    return rgbNits * (newLuma / luma);
+    float expanded = expandHighlightDetailRel(t);
+    float newT = mix(t, expanded, w);
+    float scale = newT / max(t, 1e-6);
+    // Never darken: interiors have higher guidance.g and would otherwise go dimmer than edges.
+    scale = mix(1.0, clamp(scale, 1.0, 1.5), w);
+    return rgbNits * scale;
 }
 
 // Multi-scale local contrast / perceptual depth (edge-aware).
@@ -286,6 +254,33 @@ float regionWeight(float lumaRel)
 float edgeFlatness(float localGrad)
 {
     return 1.0 - smoothstep(0.002, 0.015, localGrad);
+}
+
+// Post-curve band-aware decontour — breaks up tone-curve quantization steps.
+vec3 applyPostCurveDeband(vec3 rgbNits, float refNits, float bandW, float localAvgNits, float localRangeNits,
+                          float localGrad)
+{
+    float w = clamp(bandW, 0.0, 1.0) * edgeFlatness(localGrad);
+    if (w <= 1e-4 || localAvgNits <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float avg = localAvgNits;
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    const float lsb = 1.0 / 255.0;
+    float rampBand = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
+    float plateau = 1.0 - smoothstep(0.0, 0.75 * lsb, rangeRel);
+    float decontourW = max(rampBand, plateau * 0.85) * w;
+
+    float blend = mix(0.55, 0.75, smoothstep(0.5, 1.0, w));
+    float dev = luma - avg;
+    float hint = sign(dev != 0.0 ? dev : 1.0)
+        * min(abs(dev), max(localRangeNits * 0.45, refNits * lsb));
+    float targetDev = mix(dev, dev + hint * 0.75, decontourW * blend);
+    float newLuma = max(avg + targetDev, 1e-6);
+    return rgbNits * (newLuma / luma);
 }
 
 float alphaCoherence(float centerA, float neighborA)
@@ -456,7 +451,7 @@ float ign(vec2 p)
 }
 
 vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits, float localGrad,
-                           float spatialAvgStrength)
+                           float spatialAvgStrength, float bandW)
 {
     if (strength <= 0.0) {
         return rgbNits;
@@ -466,7 +461,8 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits,
     float outLuma = luminanceYNits(rgbNits) / ref;
     float shadowW = 1.0 - smoothstep(0.0, 0.08, outLuma);
     float edgeW = edgeFlatness(localGrad);
-    float amp = strength * shadowW * edgeW;
+    float bandDitherW = clamp(bandW, 0.0, 1.0) * edgeW;
+    float amp = strength * max(shadowW, bandDitherW * 0.35) * edgeW;
     if (spatialAvgStrength > 0.0) {
         amp *= 1.0 - shadowW * 0.5;
     }
@@ -480,7 +476,7 @@ vec3 luminanceScaledDither(vec3 rgbNits, vec2 px, float strength, float refNits,
 
 vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighborNits[MAX_AA_NEIGHBORS], float neighborDistWeights[MAX_AA_NEIGHBORS],
                          float centerAlpha, float neighborAlphas[MAX_AA_NEIGHBORS], int neighborCount, float strength,
-                         float refNits, float localGrad, float curveAaStrength, int aaQuality)
+                         float refNits, float localGrad, float curveAaStrength, int aaQuality, float bandW)
 {
     strength *= spatialProcessingWeight(centerAlpha);
     if (strength <= 0.0 || neighborCount <= 0) {
@@ -495,6 +491,7 @@ vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighborNits[MAX_AA_NEIGHBORS], f
 
     float regionW = regionWeight(centerLuma);
     float edgeW = edgeFlatness(localGrad);
+    float flatBoost = mix(1.0, 1.4, clamp(bandW, 0.0, 1.0));
     float targetLuma = centerLuma;
     float weight = 1.0;
     vec3 chromaAccum = centerNits;
@@ -512,7 +509,7 @@ vec3 spatialAvgPostCurve(vec3 centerNits, vec3 neighborNits[MAX_AA_NEIGHBORS], f
         float silW = silhouetteEdgeWeight(centerAlpha, neighborAlphas[i]);
         float alphaW = alphaCoherence(centerAlpha, neighborAlphas[i]) * (1.0 - silW);
         float distW = neighborDistWeights[i];
-        float w = max(flatW, microW * curveAaStrength) * alphaW * strength * distW;
+        float w = max(flatW * flatBoost, microW * curveAaStrength) * alphaW * strength * distW;
         float blended = (centerLuma + neighborLuma) * 0.5;
         if (microW <= flatW || silW > 0.5) {
             blended = min(blended, centerLuma);

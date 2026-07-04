@@ -88,9 +88,7 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
             const float highlightLift = std::clamp((centerLuma - 0.45f) / 0.53f, 0.0f, 1.0f);
             const float shoulderBand = smoothstep(0.85f, 0.95f, centerLuma);
             const float shoulderDetail = shoulderBand * flatness;
-            const float highlightFine = std::max(highlightConf, shoulderDetail * 0.85f);
-            const float shoulderFine = shoulderBand * flatness * 1.1f;
-            float confidence = std::max(highlightFine, shoulderFine);
+            float confidence = std::max(highlightConf, shoulderDetail * 0.85f);
             float expansion = 1.0f + confidence * highlightLift * 0.75f;
 
             const float shadowCore = 1.0f - smoothstep(0.0f, 0.14f, centerLuma);
@@ -104,11 +102,16 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
             float shadowMask =
                 shadowRegion * std::max(flatness, std::max(lowVar * 0.85f, mildGrad * 1.15f)) * shadowSoft;
 
-            const float midRegion =
-                smoothstep(0.10f, 0.20f, centerLuma) * (1.0f - smoothstep(0.72f, 0.88f, centerLuma));
-            const float mildVar =
-                smoothstep(0.0f, 0.0008f, variance) * (1.0f - smoothstep(0.003f, 0.012f, variance));
-            float depthMask = midRegion * std::max(mildVar, mildGrad * 0.5f) * softEdge * 0.65f;
+            const float midBand =
+                smoothstep(0.05f, 0.15f, centerLuma) * (1.0f - smoothstep(0.70f, 0.88f, centerLuma));
+            const float rampGrad =
+                smoothstep(0.003f, 0.025f, grad) * (1.0f - smoothstep(0.08f, 0.18f, grad));
+            const float shadowBand = (1.0f - smoothstep(0.0f, 0.12f, centerLuma)) * rampGrad;
+            const float shoulderBandMask =
+                smoothstep(0.82f, 0.94f, centerLuma) * flatness * (1.0f - smoothstep(0.08f, 0.18f, grad));
+            const float regionBand =
+                std::max(shadowBand, std::max(midBand, shoulderBandMask * 0.75f));
+            float bandMask = regionBand * std::max(flatness, rampGrad * 0.7f) * softEdge;
 
             // flatPanel also matches sky/specular interiors — do not apply to highlight R/G.
             const float flatPanel = (1.0f - smoothstep(0.005f, 0.035f, grad))
@@ -123,13 +126,13 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
             confidence *= textKeep;
             expansion = 1.0f + (expansion - 1.0f) * textKeep;
             shadowMask *= detailKeep;
-            depthMask *= detailKeep;
+            bandMask *= detailKeep;
 
             const int idx = (y * width + x) * 4;
             outputRgba[idx + 0] = std::clamp(expansion, 1.0f, 1.75f);
             outputRgba[idx + 1] = std::clamp(confidence, 0.0f, 1.0f);
             outputRgba[idx + 2] = std::clamp(shadowMask, 0.0f, 1.0f);
-            outputRgba[idx + 3] = std::clamp(depthMask, 0.0f, 1.0f);
+            outputRgba[idx + 3] = std::clamp(bandMask, 0.0f, 1.0f);
         }
     }
 }

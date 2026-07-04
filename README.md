@@ -108,56 +108,43 @@ Disabled by default. Enable globally in **System Settings → Desktop Effects �
 
 | Setting | Meaning |
 |---------|---------|
-| AI-enhanced HDR | Content-aware shadow/highlight detail recovery, perceptual depth, and highlight expansion |
-| AI strength | How strongly the guidance map applies detail, depth, and expansion (0–100%) |
-| AI quality | Guidance/chroma map resolution and update interval (Performance every 3 frames / Balanced every 2 / Quality every frame) |
-| AI backend | Auto (ONNX when built-in, else GLSL), ONNX Runtime, or GLSL only |
+| AI-enhanced HDR | Content-aware shadow/highlight detail recovery, gradient debanding, and highlight expansion |
+| AI strength | How strongly the guidance map applies detail and expansion (0–100%) |
+| Gradient smoothness | Banding-mask weight for decontour and post-curve deband (0–100%) |
+| AI quality | Guidance resolution and update cadence (Performance / Balanced / Quality) |
+| AI backend | Auto (GLSL v1.5 GPU formula by default), ONNX Runtime, or GLSL only |
 
-Guidance map channels (RGBA): highlight expansion, highlight confidence, shadow-detail mask, depth/local-contrast mask.
+Guidance map channels (RGBA): highlight expansion, highlight confidence, shadow-detail mask, **bandMask** (midtone gradient debanding).
 
-### AI chroma inference
-
-Disabled by default. Enable globally in **System Settings → Desktop Effects → AutoHDR → AI Chroma Inference**, or per app in the calibration overlay.
-
-| Setting | Meaning |
-|---------|---------|
-| AI chroma refinement | Y-locked color corrections separate from luminance: chroma banding reduction, highlight color recovery, per-pixel perceptual color intensity |
-| Chroma strength | How strongly the chroma map applies (0–100%) |
-
-Chroma map channels (RGBA): correction strength, saturation residual hint, hue residual hint, per-pixel `colorIntensity` blend for PQ remap.
+**Default Auto** runs the GLSL v1.5 formula on the GPU (`onnx-style-gpu`) every frame. Set `AUTOHDR_ONNX_V2=1` to opt into neural `guidance_v2` async ORT refinement (GLSL map remains as floor). v0/v1 sync ORT requires `AUTOHDR_ONNX_FORCE_ORT=1`.
 
 Environment overrides:
-
-| Variable | Effect |
-|----------|--------|
-| `AUTOHDR_CHROMA=0` | Force chroma AI off |
-| `AUTOHDR_CHROMA=1` | Force chroma AI on (global) |
-| `AUTOHDR_CHROMA_MODEL` | Path to a chroma `.onnx` model |
 
 | Variable | Effect |
 |----------|--------|
 | `AUTOHDR_AI=0` | Force AI off |
 | `AUTOHDR_AI=1` | Force AI on (global) |
 | `AUTOHDR_AI_QUALITY` | `Performance`, `Balanced`, or `Quality` |
+| `AUTOHDR_ONNX_V2=1` | Opt into neural guidance_v2 async ORT |
 | `AUTOHDR_ONNX_MODEL` | Path to a guidance `.onnx` model |
 | `AUTOHDR_ONNX_EP` | Force `vulkan`, `cpu`, or `cuda` |
+| `AUTOHDR_ONNX_FORCE_ORT=1` | Force sync ORT readback for v0/v1 |
 | `AUTOHDR_FLOAT_FBO` | Prefer `GL_RGBA16F` capture (also enabled automatically when AI is on) |
 
-Rebuild the optional ONNX plumbing model with:
+Rebuild guidance models:
 
 ```bash
 python3 -m venv kwin4-effect-autohdr/.venv-tools
-kwin4-effect-autohdr/.venv-tools/bin/pip install onnx numpy
+kwin4-effect-autohdr/.venv-tools/bin/pip install onnx numpy onnxscript onnxruntime
 kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/export_guidance_v1.py
-kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/export_chroma_v0.py
+kwin4-effect-autohdr/.venv-tools/bin/pip install torch
+kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/train_guidance_v2.py
 ```
 
-Train a learned chroma model (optional):
+Run the offline banding metric harness:
 
 ```bash
-pip install torch
-python kwin4-effect-autohdr/training/train_chroma.py
-python kwin4-effect-autohdr/training/export_chroma_v1.py
+python3 kwin4-effect-autohdr/tools/gradient_banding_test.py -o /tmp/banding_test
 ```
 
 CMake option: `-DAUTOHDR_ENABLE_ONNX=OFF` to skip ONNX Runtime detection.

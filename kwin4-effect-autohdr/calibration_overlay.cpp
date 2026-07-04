@@ -88,22 +88,6 @@ CalibrationOverlay::CalibrationOverlay(QWidget *parent)
     aiStrengthRow->addWidget(m_aiStrength);
     panelLayout->addLayout(aiStrengthRow);
 
-    m_aiChromaEnabled = new QCheckBox(tr("AI chroma refinement (color accuracy)"), m_contentPanel);
-    m_aiChromaEnabled->setToolTip(
-        tr("Y-locked color inference: reduces chroma banding, recovers highlight color, "
-           "and adapts perceptual color intensity per pixel."));
-    panelLayout->addWidget(m_aiChromaEnabled);
-
-    auto *chromaStrengthRow = new QHBoxLayout();
-    chromaStrengthRow->addWidget(new QLabel(tr("Chroma strength:"), m_contentPanel));
-    m_aiChromaStrength = new QDoubleSpinBox(m_contentPanel);
-    m_aiChromaStrength->setRange(0.0, 100.0);
-    m_aiChromaStrength->setSuffix(QStringLiteral(" %"));
-    m_aiChromaStrength->setDecimals(0);
-    m_aiChromaStrength->setSingleStep(5.0);
-    chromaStrengthRow->addWidget(m_aiChromaStrength);
-    panelLayout->addLayout(chromaStrengthRow);
-
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, m_contentPanel);
     if (QPushButton *confirm = m_buttons->button(QDialogButtonBox::Ok)) {
         confirm->setText(tr("Confirm"));
@@ -121,9 +105,6 @@ CalibrationOverlay::CalibrationOverlay(QWidget *parent)
     connect(m_perceptualColor, &QCheckBox::toggled, this, &CalibrationOverlay::settingsChanged);
     connect(m_aiEnhanced, &QCheckBox::toggled, this, &CalibrationOverlay::settingsChanged);
     connect(m_aiStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            &CalibrationOverlay::settingsChanged);
-    connect(m_aiChromaEnabled, &QCheckBox::toggled, this, &CalibrationOverlay::settingsChanged);
-    connect(m_aiChromaStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
             &CalibrationOverlay::settingsChanged);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &CalibrationOverlay::onConfirm);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &CalibrationOverlay::onCancel);
@@ -160,8 +141,6 @@ void CalibrationOverlay::setValues(const AutoHdr::CalibrationSettings &settings)
                         settings.gamutExpansion, settings.colorIntensity);
     m_aiEnhanced->setChecked(settings.aiEnhanced);
     m_aiStrength->setValue(settings.aiStrength * 100.0);
-    m_aiChromaEnabled->setChecked(settings.aiChromaEnabled);
-    m_aiChromaStrength->setValue(settings.aiChromaStrength * 100.0);
 }
 
 AutoHdr::CalibrationSettings CalibrationOverlay::currentValues() const
@@ -192,9 +171,6 @@ AutoHdr::CalibrationSettings CalibrationOverlay::currentValues() const
     settings.aiEnhanced = m_aiEnhanced->isChecked();
     settings.aiStrength =
         AutoHdr::clampAiStrength(static_cast<float>(m_aiStrength->value() / 100.0));
-    settings.aiChromaEnabled = m_aiChromaEnabled->isChecked();
-    settings.aiChromaStrength =
-        AutoHdr::clampAiChromaStrength(static_cast<float>(m_aiChromaStrength->value() / 100.0));
     return settings;
 }
 

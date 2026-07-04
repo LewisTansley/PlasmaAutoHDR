@@ -167,16 +167,25 @@ public:
             i18n("How strongly guidance applies shadow/highlight detail, depth, and highlight expansion."));
         aiLayout->addRow(i18n("AI strength:"), m_aiStrength);
 
+        m_aiBandingStrength = new QDoubleSpinBox(aiGroup);
+        m_aiBandingStrength->setRange(0.0, 100.0);
+        m_aiBandingStrength->setSuffix(QStringLiteral(" %"));
+        m_aiBandingStrength->setDecimals(0);
+        m_aiBandingStrength->setSingleStep(5.0);
+        m_aiBandingStrength->setToolTip(
+            i18n("How strongly the banding mask steers gradient decontouring and post-curve deband."));
+        aiLayout->addRow(i18n("Gradient smoothness:"), m_aiBandingStrength);
+
         m_aiQuality = new QComboBox(aiGroup);
-        m_aiQuality->addItem(i18n("Performance — 1/4 map, every frame"),
+        m_aiQuality->addItem(i18n("Performance — 1/4 map, refresh every 2 frames when static"),
                              static_cast<int>(AutoHdr::AiQuality::Performance));
-        m_aiQuality->addItem(i18n("Balanced — 1/2 map, every frame"),
+        m_aiQuality->addItem(i18n("Balanced — 1/2 map, every frame when content changes"),
                              static_cast<int>(AutoHdr::AiQuality::Balanced));
-        m_aiQuality->addItem(i18n("Quality — full map, every frame"),
+        m_aiQuality->addItem(i18n("Quality — full map, every frame when content changes"),
                              static_cast<int>(AutoHdr::AiQuality::Quality));
         m_aiQuality->setToolTip(
-            i18n("Guidance map resolution. Higher tiers cost more GPU time but reduce "
-                 "blockiness and keep highlights locked to motion."));
+            i18n("Guidance map resolution and update cadence. Performance skips static "
+                 "frames; Balanced and Quality update on every content change."));
         aiLayout->addRow(i18n("AI quality:"), m_aiQuality);
 
         m_aiBackend = new QComboBox(aiGroup);
@@ -186,39 +195,19 @@ public:
                              static_cast<int>(AutoHdr::AiBackend::Onnx));
         m_aiBackend->addItem(i18n("GLSL only"), static_cast<int>(AutoHdr::AiBackend::GlslOnly));
         m_aiBackend->setToolTip(
-            i18n("GLSL and ONNX both use the guidance_v1 detail model on the GPU (same look, any quality tier). "
-                 "Set AUTOHDR_ONNX_FORCE_ORT=1 to force real ONNX Runtime readback (slower, for future models)."));
+            i18n("Default Auto uses the GLSL v1.5 formula on the GPU (onnx-style-gpu). "
+                 "Set AUTOHDR_ONNX_V2=1 to opt into neural guidance_v2 async ORT. "
+                 "Set AUTOHDR_ONNX_FORCE_ORT=1 to force sync ORT readback for v0/v1."));
         aiLayout->addRow(i18n("AI backend:"), m_aiBackend);
 
         auto *aiBackendNote = new QLabel(
-            i18n("ONNX v1 runs on the GPU by default (onnx-style-gpu). "
-                 "Force ORT readback only if you need a non-v1 model."),
+            i18n("guidance_v2 is opt-in via AUTOHDR_ONNX_V2=1. Default Auto keeps the fast GLSL bandMask path."),
             aiGroup);
         aiBackendNote->setWordWrap(true);
         aiBackendNote->setStyleSheet(QStringLiteral("color: palette(mid);"));
         aiLayout->addRow(QString(), aiBackendNote);
 
         layout->addWidget(aiGroup);
-
-        auto *chromaGroup = new QGroupBox(i18n("AI Chroma Inference"), widget());
-        auto *chromaLayout = new QFormLayout(chromaGroup);
-
-        m_aiChromaEnabled = new QCheckBox(i18n("Enable AI chroma refinement"), chromaGroup);
-        m_aiChromaEnabled->setToolTip(
-            i18n("Infers color corrections separately from luminance: reduces chroma banding, "
-                 "recovers highlight color, and adapts perceptual color intensity per pixel."));
-        chromaLayout->addRow(QString(), m_aiChromaEnabled);
-
-        m_aiChromaStrength = new QDoubleSpinBox(chromaGroup);
-        m_aiChromaStrength->setRange(0.0, 100.0);
-        m_aiChromaStrength->setSuffix(QStringLiteral(" %"));
-        m_aiChromaStrength->setDecimals(0);
-        m_aiChromaStrength->setSingleStep(5.0);
-        m_aiChromaStrength->setToolTip(
-            i18n("How strongly the chroma map applies color refinement (Y-locked)."));
-        chromaLayout->addRow(i18n("Chroma strength:"), m_aiChromaStrength);
-
-        layout->addWidget(chromaGroup);
 
         m_autoActivate = new QCheckBox(i18n("Automatically apply shader to calibrated applications"), widget());
         layout->addWidget(m_autoActivate);
@@ -247,10 +236,9 @@ public:
         connect(m_highlightSoftness, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
                 &KCModule::markAsChanged);
         connect(m_aiStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
+        connect(m_aiBandingStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_aiQuality, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_aiBackend, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
-        connect(m_aiChromaEnabled, &QCheckBox::toggled, this, &KCModule::markAsChanged);
-        connect(m_aiChromaStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
     }
 
     void load() override
@@ -280,12 +268,11 @@ public:
         m_highlightSoftness->setValue(general.highlightSoftness * 100.0);
         m_aiEnhanced->setChecked(general.aiEnhanced);
         m_aiStrength->setValue(general.aiStrength * 100.0);
+        m_aiBandingStrength->setValue(general.aiBandingStrength * 100.0);
         const int aiQualityIndex = m_aiQuality->findData(static_cast<int>(general.aiQuality));
         m_aiQuality->setCurrentIndex(aiQualityIndex >= 0 ? aiQualityIndex : 1);
         const int aiBackendIndex = m_aiBackend->findData(static_cast<int>(general.aiBackend));
         m_aiBackend->setCurrentIndex(aiBackendIndex >= 0 ? aiBackendIndex : 0);
-        m_aiChromaEnabled->setChecked(general.aiChromaEnabled);
-        m_aiChromaStrength->setValue(general.aiChromaStrength * 100.0);
 
         rebuildAppsTable();
     }
@@ -334,11 +321,10 @@ public:
         general.aiEnhanced = m_aiEnhanced->isChecked();
         general.aiStrength =
             AutoHdr::clampAiStrength(static_cast<float>(m_aiStrength->value() / 100.0));
+        general.aiBandingStrength =
+            AutoHdr::clampAiBandingStrength(static_cast<float>(m_aiBandingStrength->value() / 100.0));
         general.aiQuality = AutoHdr::clampAiQuality(m_aiQuality->currentData().toInt());
         general.aiBackend = AutoHdr::clampAiBackend(m_aiBackend->currentData().toInt());
-        general.aiChromaEnabled = m_aiChromaEnabled->isChecked();
-        general.aiChromaStrength =
-            AutoHdr::clampAiChromaStrength(static_cast<float>(m_aiChromaStrength->value() / 100.0));
         AutoHdr::saveGeneralSettings(m_config, general);
 
         saveAppsTable();
@@ -418,10 +404,9 @@ private:
     QCheckBox *m_perceptualColor = nullptr;
     QCheckBox *m_aiEnhanced = nullptr;
     QDoubleSpinBox *m_aiStrength = nullptr;
+    QDoubleSpinBox *m_aiBandingStrength = nullptr;
     QComboBox *m_aiQuality = nullptr;
     QComboBox *m_aiBackend = nullptr;
-    QCheckBox *m_aiChromaEnabled = nullptr;
-    QDoubleSpinBox *m_aiChromaStrength = nullptr;
     QDoubleSpinBox *m_curveAntialias = nullptr;
     QComboBox *m_antiAliasingQuality = nullptr;
     QDoubleSpinBox *m_highlightSoftness = nullptr;

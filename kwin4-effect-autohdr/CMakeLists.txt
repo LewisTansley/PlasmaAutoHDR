@@ -45,7 +45,7 @@ kcoreaddons_add_plugin(kwin4_effect_autohdr
         tone_curve_user_presets.cpp
         ui/tone_curve_editor.cpp
         ai/guidance_inference.cpp
-        ai/chroma_inference.cpp
+        ai/guidance_worker.cpp
     INSTALL_NAMESPACE "kwin/effects/plugins"
 )
 
@@ -70,11 +70,11 @@ if(AUTOHDR_HAS_ONNX_RUNTIME)
     target_link_libraries(kwin4_effect_autohdr PRIVATE ${ONNXRUNTIME_LIBRARY})
 endif()
 
-install(FILES autohdr.frag autohdr_color.glsl autohdr_perceptual.glsl autohdr_chroma.glsl
-    autohdr_downsample.frag autohdr_guidance.frag autohdr_chroma_guidance.frag
+install(FILES autohdr.frag autohdr_color.glsl autohdr_perceptual.glsl
+    autohdr_downsample.frag autohdr_guidance.frag
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr)
-install(FILES models/guidance_v1.onnx models/guidance_v0.onnx
-    models/chroma_v0.onnx models/chroma_v1.onnx
+install(FILES models/guidance_v2.onnx models/guidance_v2.onnx.data
+    models/guidance_v1.onnx models/guidance_v0.onnx
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr/models
     OPTIONAL)
 install(PROGRAMS plasma-autohdr-calibrate

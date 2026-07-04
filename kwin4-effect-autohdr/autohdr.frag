@@ -26,18 +26,15 @@ uniform int enableSpatialAvgPreCurve;
 uniform int textureWidth;
 uniform int textureHeight;
 uniform sampler2D guidanceMap;
-uniform sampler2D chromaMap;
 uniform float aiStrength;
-uniform float aiChromaStrength;
+uniform float aiBandingStrength;
 uniform int aiEnhanced;
-uniform int aiChromaEnabled;
 
 in vec2 texcoord0;
 out vec4 fragColor;
 
 #include "autohdr_color.glsl"
 #include "autohdr_perceptual.glsl"
-#include "autohdr_chroma.glsl"
 
 float mapToneCurve(float inputNits, float inputSpan)
 {
@@ -137,46 +134,21 @@ vec4 sampleGuidance(vec2 uv)
     return vec4(max(guide.r, 1.0), clamp(guide.g, 0.0, 1.0), clamp(guide.b, 0.0, 1.0), clamp(guide.a, 0.0, 1.0));
 }
 
-vec4 sampleChroma(vec2 uv)
-{
-    if (aiChromaEnabled <= 0 || aiChromaStrength <= 1e-4) {
-        return vec4(0.0, 0.0, 0.0, -1.0);
-    }
-    vec4 c = texture(chromaMap, uv);
-    return vec4(
-        clamp(c.r, 0.0, 1.0),
-        c.g * 2.0 - 1.0,
-        c.b * 2.0 - 1.0,
-        c.a);
-}
-
 vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, float pooledCurveInputNits,
-                     float effectiveHighlightSoftness, vec4 guidance, vec4 chromaGuide, float chromaStrength,
-                     vec3 localChromaAp1, vec3 wideChromaAp1, vec3 neighborChromaAp1, float neighborChromaWeight,
-                     float localAvgNits, float wideAvgNits, float localRangeNits, float localMinNits,
-                     float localMaxNits)
+                     float effectiveHighlightSoftness, vec4 guidance, float localAvgNits, float wideAvgNits,
+                     float localRangeNits)
 {
     float strength = (aiEnhanced > 0) ? clamp(aiStrength, 0.0, 1.0) : 0.0;
-    bool chromaOn = aiChromaEnabled > 0 && chromaStrength > 1e-4 && chromaGuide.r > 1e-4;
-    float preCurveLuma = max(luminanceYNits(rgb), 1e-6);
-    float tPre = preCurveLuma / max(ref, 1e-6);
-    float shoulder = smoothstep(0.82, 0.96, tPre);
 
+    // Pre-curve: decontour + local contrast stretch (not uniform brightness lift).
     if (strength > 1e-4) {
-        float detailMask = max(max(guidance.b, guidance.a), guidance.g);
-
-        rgb = applyRampInference(rgb, ref, guidance.b, strength, localMinNits, localMaxNits, localAvgNits,
-                                 wideAvgNits, localRangeNits);
+        float bandW = guidance.a * clamp(aiBandingStrength, 0.0, 1.0);
+        float detailMask = max(guidance.b, bandW);
         rgb = applyDecontour(rgb, ref, detailMask, strength, wideAvgNits, localRangeNits, localAvgNits,
-                             guidance.b, guidance.g);
+                             guidance.b, bandW);
         rgb = applyShadowDetail(rgb, ref, guidance.b, strength, localAvgNits, localRangeNits);
-
         rgb = reconstructHighlights(rgb, ref);
-
-        rgb = applyRampInference(rgb, ref, guidance.g * shoulder, strength, localMinNits, localMaxNits,
-                                 localAvgNits, wideAvgNits, localRangeNits);
-        rgb = applyHighlightDetail(rgb, ref, guidance.g, strength, localAvgNits, localRangeNits);
-        rgb = applyDepthContrast(rgb, localAvgNits, wideAvgNits, guidance.a, strength, ref);
+        rgb = applyHighlightDetail(rgb, ref, guidance.g, strength);
     } else {
         rgb = reconstructHighlights(rgb, ref);
     }
@@ -188,16 +160,7 @@ vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, fl
     float scale = outputNits / max(rawLumaNits, 1e-6);
 
     if (perceptualColorEnabled > 0) {
-        float localCi = -1.0;
-        if (chromaOn && chromaGuide.a >= 0.0) {
-            localCi = mix(colorIntensity, chromaGuide.a, chromaStrength * chromaGuide.r);
-        }
-        rgb = applyPerceptualLuminanceMap(rgb, rawLumaNits, outputNits, colorIntensity, pqBoostParams, localCi);
-
-        if (chromaOn) {
-            rgb = applyChromaRefinement(rgb, ref, chromaGuide, guidance, chromaStrength, wideChromaAp1,
-                                        localChromaAp1, neighborChromaAp1, neighborChromaWeight);
-        }
+        rgb = applyPerceptualLuminanceMap(rgb, rawLumaNits, outputNits, colorIntensity, pqBoostParams);
 
         if (gamutExpansion > 0.0) {
             rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
@@ -210,11 +173,6 @@ vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, fl
     } else {
         rgb *= scale;
 
-        if (chromaOn) {
-            rgb = applyChromaRefinement(rgb, ref, chromaGuide, guidance, chromaStrength, wideChromaAp1,
-                                        localChromaAp1, neighborChromaAp1, neighborChromaWeight);
-        }
-
         if (gamutExpansion > 0.0) {
             rgb = expandGamutSmart(rgb / ref, gamutExpansion) * ref;
         }
@@ -224,14 +182,13 @@ vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, fl
         rgb *= limitedLuma / max(outLuma, 1e-6);
     }
 
-    // Post-curve highlight contrast: mean-preserving around scaled local avg (no global lift).
-    if (strength > 1e-4 && localAvgNits > 0.0) {
+    // Post-curve highlight punch: confident pixels move toward luma*expansion (capped at peak).
+    if (strength > 1e-4) {
         float luma = max(luminanceYNits(rgb), 1e-6);
         float conf = clamp(guidance.g, 0.0, 1.0);
-        float scaledAvg = localAvgNits * (luma / max(preCurveLuma, 1e-6));
-        float delta = luma - scaledAvg;
-        float gain = mix(1.0, max(guidance.r, 1.0), conf * strength);
-        float target = clamp(scaledAvg + delta * gain, 0.0, displayPeak);
+        float t = conf * strength;
+        float boosted = min(luma * max(guidance.r, 1.0), displayPeak);
+        float target = mix(luma, boosted, t);
         rgb *= target / luma;
     }
 
@@ -243,9 +200,7 @@ vec3 sampleToneMappedNits(sampler2D tex, vec2 uv, float ref, float displayPeak, 
 {
     vec4 texSample = texture(tex, uv);
     return toneMapPipeline(decodeRgbNits(texSample, ref, sourceWhite), ref, displayPeak, curveSpan,
-                           pooledCurveInputNits, effectiveHighlightSoftness, sampleGuidance(uv),
-                           vec4(0.0, 0.0, 0.0, -1.0), 0.0, vec3(1.0), vec3(1.0), vec3(1.0), 0.0,
-                           0.0, 0.0, 0.0, 0.0, 0.0);
+                           pooledCurveInputNits, effectiveHighlightSoftness, sampleGuidance(uv), 0.0, 0.0, 0.0);
 }
 
 void fetchNeighborSample(sampler2D tex, ivec2 px, ivec2 offset, ivec2 texSize, float ref, float sourceWhite,
@@ -310,8 +265,7 @@ void main()
     }
 
     bool aiOn = aiEnhanced > 0 && aiStrength > 1e-4;
-    bool chromaOn = aiChromaEnabled > 0 && aiChromaStrength > 1e-4;
-    bool needNeighbors = curveAa > 0.0 || spatialAvg > 0.0 || ditherStrength > 0.0 || aiOn || chromaOn;
+    bool needNeighbors = curveAa > 0.0 || spatialAvg > 0.0 || ditherStrength > 0.0 || aiOn;
     if (texSize.x > 0 && needNeighbors) {
         ivec2 px = ivec2(clamp(texcoord0 * vec2(texSize), vec2(0.0), vec2(texSize - ivec2(1))));
 
@@ -377,51 +331,35 @@ void main()
     }
 
     vec4 centerGuidance = sampleGuidance(texcoord0);
-    vec4 centerChroma = sampleChroma(texcoord0);
-    float chromaStrength = clamp(aiChromaStrength, 0.0, 1.0);
-    vec3 localChromaAp1 = vec3(1.0);
-    vec3 wideChromaAp1 = vec3(1.0);
-    vec3 neighborChromaAp1 = vec3(1.0);
-    float neighborChromaWeight = 0.0;
+    float bandW = 0.0;
+    if (aiOn) {
+        bandW = centerGuidance.a * clamp(aiBandingStrength, 0.0, 1.0) * clamp(aiStrength, 0.0, 1.0);
+    }
     float localAvgNits = 0.0;
     float wideAvgNits = 0.0;
     float localRangeNits = 0.0;
-    float localMinNits = 0.0;
-    float localMaxNits = 0.0;
-    if ((aiOn || chromaOn) && texSize.x > 0) {
+    if (aiOn && texSize.x > 0) {
         float centerL = luminanceYNits(rgb);
         float localAccum = centerL;
         float localMin = centerL;
         float localMax = centerL;
-        vec3 chromaAccum = autohdrRgbRelToAp1Chroma(rgb / max(ref, 1.0));
         for (int i = 0; i < 8; ++i) {
             float nL = luminanceYNits(neighborInputs[i]);
             localAccum += nL;
             localMin = min(localMin, nL);
             localMax = max(localMax, nL);
-            chromaAccum += autohdrRgbRelToAp1Chroma(neighborInputs[i] / max(ref, 1.0));
         }
         localAvgNits = localAccum / 9.0;
-        localMinNits = localMin;
-        localMaxNits = localMax;
         localRangeNits = localMax - localMin;
-        localChromaAp1 = chromaAccum / 9.0;
 
         float wideAccum = localAccum;
-        vec3 wideChromaAccum = chromaAccum;
         for (int i = 8; i < 12; ++i) {
             wideAccum += luminanceYNits(neighborInputs[i]);
-            wideChromaAccum += autohdrRgbRelToAp1Chroma(neighborInputs[i] / max(ref, 1.0));
         }
         wideAvgNits = wideAccum / 13.0;
-        wideChromaAp1 = wideChromaAccum / 13.0;
-        neighborChromaAp1 = wideChromaAp1;
-        neighborChromaWeight = 1.0;
     }
     rgb = toneMapPipeline(rgb, ref, displayPeak, curveSpan, pooledCurveInput, effectiveHighlightSoftness,
-                          centerGuidance, centerChroma, chromaStrength, localChromaAp1, wideChromaAp1,
-                          neighborChromaAp1, neighborChromaWeight, localAvgNits, wideAvgNits, localRangeNits,
-                          localMinNits, localMaxNits);
+                          centerGuidance, localAvgNits, wideAvgNits, localRangeNits);
 
     float localGrad = 0.0;
     vec3 toneMappedNeighbors[MAX_AA_NEIGHBORS];
@@ -456,28 +394,32 @@ void main()
             toneMappedNeighbors[i] =
                 toneMapPipeline(neighborInputs[i], ref, displayPeak, curveSpan, neighborPooled,
                                 highlightSoftness * spatialProcessingWeight(neighborAlphas[i]),
-                                sampleGuidance(nuv), vec4(0.0, 0.0, 0.0, -1.0), 0.0, vec3(1.0), vec3(1.0),
-                                vec3(1.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                                sampleGuidance(nuv), 0.0, 0.0, 0.0);
             gradAccum += abs(luminanceYNits(toneMappedNeighbors[i]) / ref - centerLuma);
         }
 
         localGrad = gradAccum / float(postCurveCount);
     }
 
+    if (aiOn && bandW > 1e-4 && localAvgNits > 0.0) {
+        rgb = applyPostCurveDeband(rgb, ref, bandW, localAvgNits, localRangeNits, localGrad);
+    }
+
     if (spatialAvg > 0.0) {
-        // Do not immediately average away shadow/midtone detail reconstruction.
-        float detailProtect = 0.0;
+        float shadowProtect = 0.0;
+        float bandBoost = 1.0;
         if (aiOn) {
-            detailProtect = (centerGuidance.b * 0.25 + centerGuidance.a * 0.35) * clamp(aiStrength, 0.0, 1.0);
+            shadowProtect = centerGuidance.b * 0.25 * clamp(aiStrength, 0.0, 1.0);
+            bandBoost = mix(1.0, 1.55, bandW);
         }
-        float debandW = spatialAvg * (1.0 - detailProtect);
+        float debandW = spatialAvg * bandBoost * (1.0 - shadowProtect * 0.5);
         if (debandW > 1e-4) {
             rgb = spatialAvgPostCurve(rgb, toneMappedNeighbors, neighborDistWeights, centerAlpha, neighborAlphas,
-                                      postCurveCount, debandW, ref, localGrad, curveAa, aaQuality);
+                                      postCurveCount, debandW, ref, localGrad, curveAa, aaQuality, bandW);
         }
     }
 
-    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad, spatialAvg);
+    rgb = luminanceScaledDither(rgb, gl_FragCoord.xy, ditherStrength, ref, localGrad, spatialAvg, bandW);
 
     if (fringeAlpha) {
         tex.rgb = max(rgb, vec3(0.0));

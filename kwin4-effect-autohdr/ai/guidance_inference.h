@@ -24,7 +24,7 @@ public:
     //   R = highlight expansion (>=1)
     //   G = highlight confidence / shoulder-detail mask [0,1]
     //   B = shadow detail mask [0,1]
-    //   A = depth / local-contrast mask [0,1]
+    //   A = bandMask — midtone ramp debanding [0,1]
     virtual bool run(const float *inputRgb, int width, int height, float *outputRgba) = 0;
 };
 

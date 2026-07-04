@@ -38,8 +38,6 @@ struct CalibrationSettings {
     QString toneCurveUserPresetId;
     bool aiEnhanced = false;
     float aiStrength = 0.5f;
-    bool aiChromaEnabled = false;
-    float aiChromaStrength = 0.5f;
 };
 
 constexpr float kReferenceNitsMin = 80.0f;
@@ -53,7 +51,7 @@ float clampCurveAntialiasStrength(float value);
 float clampHighlightSoftness(float value);
 int clampAntiAliasingQuality(int value);
 float clampAiStrength(float value);
-float clampAiChromaStrength(float value);
+float clampAiBandingStrength(float value);
 AiQuality clampAiQuality(int value);
 AiBackend clampAiBackend(int value);
 int aiGuidanceScale(AiQuality quality);
@@ -87,8 +85,7 @@ struct GeneralSettings {
     float aiStrength = 0.5f;
     AiQuality aiQuality = AiQuality::Balanced;
     AiBackend aiBackend = AiBackend::Auto;
-    bool aiChromaEnabled = false;
-    float aiChromaStrength = 0.5f;
+    float aiBandingStrength = 0.7f;
 };
 
 constexpr const char *configFileName = "kwin4effectautohdr";
