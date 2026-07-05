@@ -112,11 +112,16 @@ Disabled by default. Enable globally in **System Settings → Desktop Effects �
 | AI strength | How strongly the guidance map applies detail and expansion (0–100%) |
 | Gradient smoothness | Banding-mask weight for decontour and post-curve deband (0–100%) |
 | AI quality | Guidance resolution and update cadence (Performance / Balanced / Quality) |
-| AI backend | Auto (GLSL v1.5 GPU formula by default), ONNX Runtime, or GLSL only |
+| AI model | **Latest** (default) picks the newest installed guidance model; or choose v2 (trained neural), v1 (formula GPU), or v0 (legacy) |
+| AI backend | Auto (ONNX when the selected model needs it, else GLSL), ONNX Runtime, or GLSL only |
 
 Guidance map channels (RGBA): highlight expansion, highlight confidence, shadow-detail mask, **bandMask** (midtone gradient debanding).
 
-**Default Auto** runs the GLSL v1.5 formula on the GPU (`onnx-style-gpu`) every frame. Set `AUTOHDR_ONNX_V2=1` to opt into neural `guidance_v2` async ORT refinement (GLSL map remains as floor). v0/v1 sync ORT requires `AUTOHDR_ONNX_FORCE_ORT=1`.
+**Latest** defaults to the highest-version installed model (trained `guidance_v2` when present). Formula models (v0/v1) run on the GPU (`onnx-style-gpu`); trained v2 uses async ONNX Runtime at fixed low resolution (128–256px, GPU-upscaled) with a per-frame GLSL floor. v0/v1 sync ORT requires `AUTOHDR_ONNX_FORCE_ORT=1`.
+
+**Performance tiers (trained v2 ORT input):** Performance 128×128, Balanced 192×192, Quality 256×256. GLSL display maps stay at 1/4–1/2 window resolution. HDR presentation runs every compositor frame for all active windows on HDR outputs (transformed paint flags + compositor heartbeat; direct scanout blocked while active); offscreen capture uses damage events plus a 30 Hz heartbeat for paused video, and ORT submits only on real content damage (throttled when the worker is busy).
+
+**Zen / Firefox:** Firefox-class browsers rebuild internal Wayland surface/subsurface items when content goes static. AutoHDR tracks `surfaceItem` redirects, watches subsurface tree changes, and refreshes browser redirects from the compositor heartbeat so the effect does not drop to native SDR when idle. Disabling `gfx.wayland.hdr` in `about:config` is optional but can reduce color-space churn.
 
 Environment overrides:
 
@@ -125,11 +130,12 @@ Environment overrides:
 | `AUTOHDR_AI=0` | Force AI off |
 | `AUTOHDR_AI=1` | Force AI on (global) |
 | `AUTOHDR_AI_QUALITY` | `Performance`, `Balanced`, or `Quality` |
-| `AUTOHDR_ONNX_V2=1` | Opt into neural guidance_v2 async ORT |
+| `AUTOHDR_ONNX_V2=1` | Legacy override: force guidance_v2 (prefer KCM **AI model** setting) |
 | `AUTOHDR_ONNX_MODEL` | Path to a guidance `.onnx` model |
 | `AUTOHDR_ONNX_EP` | Force `vulkan`, `cpu`, or `cuda` |
 | `AUTOHDR_ONNX_FORCE_ORT=1` | Force sync ORT readback for v0/v1 |
-| `AUTOHDR_FLOAT_FBO` | Prefer `GL_RGBA16F` capture (also enabled automatically when AI is on) |
+| `AUTOHDR_FLOAT_FBO` | Prefer `GL_RGBA16F` offscreen capture (default with perceptual color mode) |
+| `AUTOHDR_DEBUG_PAINT=1` | Log paint-path, ItemEffect rebinds, subsurface refresh, and rate-limited idle redirect state (every 2s) |
 
 Rebuild guidance models:
 
@@ -139,7 +145,10 @@ kwin4-effect-autohdr/.venv-tools/bin/pip install onnx numpy onnxscript onnxrunti
 kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/export_guidance_v1.py
 kwin4-effect-autohdr/.venv-tools/bin/pip install torch
 kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/train_guidance_v2.py
+kwin4-effect-autohdr/.venv-tools/bin/python kwin4-effect-autohdr/tools/train_guidance_v2.py --fixed-export
 ```
+
+Use `--fixed-export` for a static 128×128 ONNX graph (faster ORT kernel caching at runtime).
 
 Run the offline banding metric harness:
 

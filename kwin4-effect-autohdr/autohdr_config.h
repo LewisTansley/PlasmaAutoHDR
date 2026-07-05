@@ -6,6 +6,7 @@
 #include <KConfigGroup>
 #include <KSharedConfig>
 #include <QPointF>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -24,6 +25,22 @@ enum class AiBackend {
     Auto = 0,
     Onnx = 1,
     GlslOnly = 2,
+};
+
+enum class AiGuidanceModel {
+    Latest = 0,
+    GuidanceV2 = 1,
+    GuidanceV1 = 2,
+    GuidanceV0 = 3,
+};
+
+struct GuidanceModelDescriptor {
+    AiGuidanceModel id = AiGuidanceModel::Latest;
+    int version = 0;
+    QString fileName;
+    QString displayName;
+    bool usesGlslFormula = false;
+    bool usesAsyncOrt = false;
 };
 
 struct CalibrationSettings {
@@ -56,10 +73,19 @@ AiQuality clampAiQuality(int value);
 AiBackend clampAiBackend(int value);
 int aiGuidanceScale(AiQuality quality);
 int aiInferenceInterval(AiQuality quality);
+QSize aiOrtInferenceSize(AiQuality quality);
+int aiOrtSubmitInterval(AiQuality quality);
 QString aiQualityToString(AiQuality quality);
 AiQuality aiQualityFromString(const QString &value);
 QString aiBackendToString(AiBackend backend);
 AiBackend aiBackendFromString(const QString &value);
+AiGuidanceModel clampAiGuidanceModel(int value);
+QString aiGuidanceModelToString(AiGuidanceModel model);
+AiGuidanceModel aiGuidanceModelFromString(const QString &value);
+QString locateEffectDataFile(const QString &relativePath);
+QVector<GuidanceModelDescriptor> guidanceModelDescriptors();
+QString resolveGuidanceModelPath(AiGuidanceModel model);
+std::optional<GuidanceModelDescriptor> guidanceModelFromPath(const QString &modelPath);
 
 struct AppProfileMetadata {
     QString key;
@@ -85,6 +111,7 @@ struct GeneralSettings {
     float aiStrength = 0.5f;
     AiQuality aiQuality = AiQuality::Balanced;
     AiBackend aiBackend = AiBackend::Auto;
+    AiGuidanceModel aiGuidanceModel = AiGuidanceModel::Latest;
     float aiBandingStrength = 0.7f;
 };
 

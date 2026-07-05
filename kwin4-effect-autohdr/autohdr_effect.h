@@ -9,13 +9,16 @@
 #include <scene/item.h>
 #include <KSharedConfig>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QPointer>
 #include <QSet>
 #include <QString>
+#include <QTimer>
 #include <map>
 #include <memory>
+#include <cstdint>
 #include <vector>
 
 class QAction;
@@ -64,14 +67,26 @@ namespace KWin {
             std::unique_ptr<GLFramebuffer> downsampleFbo;
             std::unique_ptr<GLTexture> guidanceTexture;
             std::unique_ptr<GLFramebuffer> guidanceFbo;
+            std::unique_ptr<GLTexture> guidanceScratchTexture;
+            std::unique_ptr<GLFramebuffer> guidanceScratchFbo;
+            std::unique_ptr<GLTexture> ortInputTexture;
+            std::unique_ptr<GLFramebuffer> ortInputFbo;
+            std::unique_ptr<GLTexture> ortOutputTexture;
             bool isDirty = true;
+            bool contentDamaged = true;
             bool guidanceValid = false;
             bool guidanceEverUploaded = false;
             bool needsGuidanceUpdate = true;
             bool downsampleFloat = false;
             QSize guidanceSize;
+            QSize ortInferenceSize;
+            qint64 lastCaptureMs = 0;
+            QPointer<Item> redirectedItem;
+            QPointer<Item> redirectedSurfaceItem;
             QMetaObject::Connection windowDamagedConnection;
             QMetaObject::Connection windowExpandedGeometryConnection;
+            QMetaObject::Connection surfaceColorConnection;
+            QMetaObject::Connection subsurfaceTreeConnection;
             ItemEffect windowEffect;
         };
 
@@ -103,8 +118,15 @@ namespace KWin {
                                const QSize &targetSize, int sourceWidth, int sourceHeight);
         void uploadGuidanceTexture(OffscreenWindowData *offscreenData, const float *rgba, int width, int height);
         bool readDownsampleRgb(OffscreenWindowData *offscreenData, int mapW, int mapH);
+        bool readOrtInputRgb(OffscreenWindowData *offscreenData, int mapW, int mapH);
+        void finishPendingOrtReadback();
+        void issueOrtInputReadback(OffscreenWindowData *offscreenData, int mapW, int mapH);
+        void ensureOrtPbo(int mapW, int mapH);
+        bool shouldSubmitOrt(OffscreenWindowData *offscreenData);
+        void uploadOrtOutputAndBlend(OffscreenWindowData *offscreenData, const float *rgba, int ortW, int ortH);
+        void renderGuidanceBlendPass(OffscreenWindowData *offscreenData, int mapW, int mapH);
         bool readGuidanceMapRgba(OffscreenWindowData *offscreenData, int mapW, int mapH, std::vector<float> &rgba);
-        void blendGuidanceWithGlslFloor(std::vector<float> &rgba) const;
+        void blendGuidanceWithGlslFloor(std::vector<float> &rgba, const std::vector<float> &glslFloor) const;
         bool shouldUseAi(const CalibrationSettings &settings) const;
         bool preferOnnxGuidance() const;
         bool useOnnxGpuFastPath() const;
@@ -113,6 +135,10 @@ namespace KWin {
         bool isGuidanceV2Model(const QString &modelPath) const;
         QSize capGuidanceSizeForOrt(const QSize &size) const;
         void pollAsyncGuidanceResults();
+        void scheduleActiveHdrRepaints();
+        void ensureCompositorHeartbeat();
+        void onCompositorHeartbeat();
+        bool anyActiveHdrWindow() const;
         void initGuidanceInference();
         void invalidateAllGuidance();
         QString activeGuidanceBackendLabel() const;
@@ -124,6 +150,14 @@ namespace KWin {
         void performUnredirect(EffectWindow *window);
         void redirect(EffectWindow *window);
         void unredirect(EffectWindow *window);
+        bool isBrowserWindow(EffectWindow *window) const;
+        void applyBrowserSdrPreference(EffectWindow *window);
+        Item *redirectTargetForWindow(EffectWindow *window) const;
+        bool ensureWindowRedirect(EffectWindow *window, OffscreenWindowData *offscreenData);
+        void forceWindowRedirectRefresh(EffectWindow *window, OffscreenWindowData *offscreenData);
+        void ensureSurfaceColorTracking(EffectWindow *window, OffscreenWindowData *offscreenData);
+        void ensureBrowserSurfaceTracking(EffectWindow *window, OffscreenWindowData *offscreenData);
+        void logIdlePaintState(EffectWindow *window, const char *path);
         void maybeRenderOffscreen(EffectWindow *window);
         void paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window,
                             int mask, const Region &deviceRegion, const WindowPaintData &data, const WindowQuadList &quads);
@@ -196,6 +230,7 @@ namespace KWin {
         bool m_calibrationPerceptualBaseline = true;
         bool m_warnedOverlayHdrPresentation = false;
         bool m_warnedOverlayBlur = false;
+        bool m_loggedBrowserHdrToast = false;
         QMetaObject::Connection m_windowDeletedConnection;
         QMetaObject::Connection m_frameGeometryConnection;
         QList<QMetaObject::Connection> m_outputHdrConnections;
@@ -204,6 +239,8 @@ namespace KWin {
         bool m_outputTrackingConnected = false;
         LogicalOutput *m_currentPaintOutput = nullptr;
         bool m_paintingCompositorMargin = false;
+        bool m_paintingOffscreenCapture = false;
+        QTimer m_compositorHeartbeat;
 
         CalibrationSettings m_globalDefaults;
         float m_hdrReferenceNits = 100.0f;
@@ -254,11 +291,12 @@ namespace KWin {
 
         std::unique_ptr<GLShader> m_downsampleShader;
         std::unique_ptr<GLShader> m_guidanceShader;
+        std::unique_ptr<GLShader> m_guidanceBlendShader;
         std::unique_ptr<GLTexture> m_neutralGuidanceTexture;
         std::unique_ptr<AutoHdr::GuidanceInference> m_guidanceInference;
         std::unique_ptr<AutoHdr::GuidanceWorker> m_guidanceWorker;
         QString m_guidanceBackendName;
-        bool m_guidanceAsyncPending = false;
+        uint64_t m_asyncGuidanceGeneration = 0;
         OffscreenWindowData *m_asyncGuidanceTarget = nullptr;
         bool m_loggedOrtCapWarning = false;
         bool m_aiEnabledGlobal = false;
@@ -266,13 +304,24 @@ namespace KWin {
         float m_aiBandingStrengthGlobal = 0.7f;
         AutoHdr::AiQuality m_aiQuality = AutoHdr::AiQuality::Balanced;
         AutoHdr::AiBackend m_aiBackend = AutoHdr::AiBackend::Auto;
+        AutoHdr::AiGuidanceModel m_aiGuidanceModel = AutoHdr::AiGuidanceModel::Latest;
         bool m_aiForceDisabled = false;
         bool m_loggedGuidanceBackend = false;
         bool m_loggedNeutralGuidance = false;
+        bool m_loggedAiResourcesFailure = false;
         bool m_loggedAsyncFailure = false;
         bool m_loggedV2Active = false;
         bool m_loggedOrtUbyteWarning = false;
         int m_guidanceFrameCounter = 0;
+        bool m_frameBudgetSkipOrt = false;
+        qreal m_lastCompositorFrameMs = 0.0;
+        QElapsedTimer m_compositorFrameTimer;
+        GLuint m_ortPbo[2] = {0, 0};
+        int m_ortPboWriteIndex = 0;
+        bool m_ortPboReadPending = false;
+        OffscreenWindowData *m_ortPboReadTarget = nullptr;
+        int m_ortPboReadW = 0;
+        int m_ortPboReadH = 0;
         std::vector<float> m_downsampleReadback;
         std::vector<float> m_downsampleReadbackFloat;
         std::vector<unsigned char> m_downsampleUbyte;

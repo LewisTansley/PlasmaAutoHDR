@@ -30,10 +30,10 @@ void GuidanceWorker::shutdown()
     }
 }
 
-void GuidanceWorker::submit(const float *inputRgb, int width, int height)
+uint64_t GuidanceWorker::submit(const float *inputRgb, int width, int height)
 {
     if (!inputRgb || width <= 0 || height <= 0 || !m_inference) {
-        return;
+        return 0;
     }
 
     QMutexLocker lock(&m_mutex);
@@ -42,10 +42,12 @@ void GuidanceWorker::submit(const float *inputRgb, int width, int height)
     std::copy(inputRgb, inputRgb + pixelCount * 3, m_inputRgb.begin());
     m_jobWidth = width;
     m_jobHeight = height;
+    ++m_submitGeneration;
     m_hasWork = true;
     m_resultReady = false;
     m_jobFailed = false;
     m_workAvailable.wakeOne();
+    return m_submitGeneration;
 }
 
 bool GuidanceWorker::takeFailedJob()
@@ -58,7 +60,14 @@ bool GuidanceWorker::takeFailedJob()
     return true;
 }
 
-bool GuidanceWorker::tryTakeResult(std::vector<float> *outputRgba, int *width, int *height)
+bool GuidanceWorker::hasInflightWork()
+{
+    QMutexLocker lock(&m_mutex);
+    return m_hasWork || m_processing;
+}
+
+bool GuidanceWorker::tryTakeResult(std::vector<float> *outputRgba, int *width, int *height,
+                                   uint64_t *resultGeneration)
 {
     if (!outputRgba) {
         return false;
@@ -74,6 +83,9 @@ bool GuidanceWorker::tryTakeResult(std::vector<float> *outputRgba, int *width, i
     }
     if (height) {
         *height = m_jobHeight;
+    }
+    if (resultGeneration) {
+        *resultGeneration = m_resultGeneration;
     }
     m_resultReady = false;
     return true;
@@ -93,7 +105,9 @@ void GuidanceWorker::run()
         const int width = m_jobWidth;
         const int height = m_jobHeight;
         std::vector<float> input = m_inputRgb;
+        const uint64_t genAtStart = m_submitGeneration;
         m_hasWork = false;
+        m_processing = true;
         lock.unlock();
 
         const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
@@ -101,10 +115,17 @@ void GuidanceWorker::run()
         const bool ok = m_inference && m_inference->run(input.data(), width, height, output.data());
 
         lock.relock();
+        m_processing = false;
+        if (genAtStart != m_submitGeneration) {
+            // A newer frame arrived during inference — discard stale output.
+            continue;
+        }
         if (ok) {
             m_outputRgba = std::move(output);
+            m_resultGeneration = genAtStart;
             m_resultReady = true;
         } else {
+            m_failedGeneration = genAtStart;
             m_jobFailed = true;
         }
         m_workDone.wakeAll();

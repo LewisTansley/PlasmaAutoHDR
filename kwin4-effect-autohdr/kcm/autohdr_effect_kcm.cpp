@@ -27,6 +27,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -188,6 +189,18 @@ public:
                  "frames; Balanced and Quality update on every content change."));
         aiLayout->addRow(i18n("AI quality:"), m_aiQuality);
 
+        m_aiGuidanceModel = new QComboBox(aiGroup);
+        m_aiGuidanceModel->addItem(i18n("Latest — newest installed model"),
+                                   static_cast<int>(AutoHdr::AiGuidanceModel::Latest));
+        for (const AutoHdr::GuidanceModelDescriptor &descriptor : AutoHdr::guidanceModelDescriptors()) {
+            m_aiGuidanceModel->addItem(i18n("%1", descriptor.displayName), static_cast<int>(descriptor.id));
+        }
+        m_aiGuidanceModel->setToolTip(
+            i18n("Which guidance model drives AI detail recovery. Latest picks the highest-version "
+                 "model installed on disk (trained v2 by default). Formula models run on the GPU; "
+                 "trained models refine the map with async ONNX Runtime."));
+        aiLayout->addRow(i18n("AI model:"), m_aiGuidanceModel);
+
         m_aiBackend = new QComboBox(aiGroup);
         m_aiBackend->addItem(i18n("Auto — ONNX when available, else GLSL"),
                              static_cast<int>(AutoHdr::AiBackend::Auto));
@@ -195,17 +208,10 @@ public:
                              static_cast<int>(AutoHdr::AiBackend::Onnx));
         m_aiBackend->addItem(i18n("GLSL only"), static_cast<int>(AutoHdr::AiBackend::GlslOnly));
         m_aiBackend->setToolTip(
-            i18n("Default Auto uses the GLSL v1.5 formula on the GPU (onnx-style-gpu). "
-                 "Set AUTOHDR_ONNX_V2=1 to opt into neural guidance_v2 async ORT. "
-                 "Set AUTOHDR_ONNX_FORCE_ORT=1 to force sync ORT readback for v0/v1."));
+            i18n("Controls whether ONNX Runtime is used when the selected model requires it. "
+                 "Formula models (v0/v1) always use the fast GLSL GPU path unless "
+                 "AUTOHDR_ONNX_FORCE_ORT=1 is set."));
         aiLayout->addRow(i18n("AI backend:"), m_aiBackend);
-
-        auto *aiBackendNote = new QLabel(
-            i18n("guidance_v2 is opt-in via AUTOHDR_ONNX_V2=1. Default Auto keeps the fast GLSL bandMask path."),
-            aiGroup);
-        aiBackendNote->setWordWrap(true);
-        aiBackendNote->setStyleSheet(QStringLiteral("color: palette(mid);"));
-        aiLayout->addRow(QString(), aiBackendNote);
 
         layout->addWidget(aiGroup);
 
@@ -238,6 +244,7 @@ public:
         connect(m_aiStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_aiBandingStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &KCModule::markAsChanged);
         connect(m_aiQuality, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
+        connect(m_aiGuidanceModel, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
         connect(m_aiBackend, qOverload<int>(&QComboBox::currentIndexChanged), this, &KCModule::markAsChanged);
     }
 
@@ -271,6 +278,10 @@ public:
         m_aiBandingStrength->setValue(general.aiBandingStrength * 100.0);
         const int aiQualityIndex = m_aiQuality->findData(static_cast<int>(general.aiQuality));
         m_aiQuality->setCurrentIndex(aiQualityIndex >= 0 ? aiQualityIndex : 1);
+        updateAiGuidanceModelAvailability();
+        const int aiGuidanceModelIndex =
+            m_aiGuidanceModel->findData(static_cast<int>(general.aiGuidanceModel));
+        m_aiGuidanceModel->setCurrentIndex(aiGuidanceModelIndex >= 0 ? aiGuidanceModelIndex : 0);
         const int aiBackendIndex = m_aiBackend->findData(static_cast<int>(general.aiBackend));
         m_aiBackend->setCurrentIndex(aiBackendIndex >= 0 ? aiBackendIndex : 0);
 
@@ -324,6 +335,8 @@ public:
         general.aiBandingStrength =
             AutoHdr::clampAiBandingStrength(static_cast<float>(m_aiBandingStrength->value() / 100.0));
         general.aiQuality = AutoHdr::clampAiQuality(m_aiQuality->currentData().toInt());
+        general.aiGuidanceModel =
+            AutoHdr::clampAiGuidanceModel(m_aiGuidanceModel->currentData().toInt());
         general.aiBackend = AutoHdr::clampAiBackend(m_aiBackend->currentData().toInt());
         AutoHdr::saveGeneralSettings(m_config, general);
 
@@ -334,6 +347,21 @@ public:
     }
 
 private:
+    void updateAiGuidanceModelAvailability()
+    {
+        auto *itemModel = qobject_cast<QStandardItemModel *>(m_aiGuidanceModel->model());
+        for (int index = 0; index < m_aiGuidanceModel->count(); ++index) {
+            const auto guidanceModel =
+                static_cast<AutoHdr::AiGuidanceModel>(m_aiGuidanceModel->itemData(index).toInt());
+            const bool available = !AutoHdr::resolveGuidanceModelPath(guidanceModel).isEmpty();
+            if (itemModel) {
+                if (QStandardItem *item = itemModel->item(index)) {
+                    item->setEnabled(available);
+                }
+            }
+        }
+    }
+
     void rebuildAppsTable()
     {
         m_appsTable->setRowCount(0);
@@ -406,6 +434,7 @@ private:
     QDoubleSpinBox *m_aiStrength = nullptr;
     QDoubleSpinBox *m_aiBandingStrength = nullptr;
     QComboBox *m_aiQuality = nullptr;
+    QComboBox *m_aiGuidanceModel = nullptr;
     QComboBox *m_aiBackend = nullptr;
     QDoubleSpinBox *m_curveAntialias = nullptr;
     QComboBox *m_antiAliasingQuality = nullptr;

@@ -168,6 +168,11 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parents[1] / "models" / "guidance_v2.onnx",
     )
+    parser.add_argument(
+        "--fixed-export",
+        action="store_true",
+        help="Export a static-shape ONNX (no dynamic H/W) for faster ORT graph caching",
+    )
     args = parser.parse_args()
 
     try:
@@ -263,16 +268,16 @@ def main() -> int:
     model.eval()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     dummy = torch.zeros(1, 3, args.size, args.size)
-    torch.onnx.export(
-        model,
-        dummy,
-        args.output,
-        input_names=["input"],
-        output_names=["output"],
-        dynamic_axes={"input": {2: "H", 3: "W"}, "output": {2: "H", 3: "W"}},
-        opset_version=13,
-    )
-    print(f"Wrote {args.output} (ramp_std={ramp_std:.4f}, flat_mean={flat_mean:.4f})")
+    export_kwargs = {
+        "input_names": ["input"],
+        "output_names": ["output"],
+        "opset_version": 13,
+    }
+    if not args.fixed_export:
+        export_kwargs["dynamic_axes"] = {"input": {2: "H", 3: "W"}, "output": {2: "H", 3: "W"}}
+    torch.onnx.export(model, dummy, args.output, **export_kwargs)
+    shape_note = "fixed" if args.fixed_export else "dynamic"
+    print(f"Wrote {args.output} ({shape_note}, ramp_std={ramp_std:.4f}, flat_mean={flat_mean:.4f})")
     return 0
 
 

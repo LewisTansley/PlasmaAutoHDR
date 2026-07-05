@@ -28,6 +28,7 @@ public:
     void setValues(const AutoHdr::CalibrationSettings &settings);
     void setPerceptualColorEnabled(bool enabled);
     bool perceptualColorEnabled() const;
+    void setGlobalAiEnabled(bool enabled);
     AutoHdr::CalibrationSettings currentValues() const;
     QRect panelBlurRegion() const;
 

@@ -14,15 +14,15 @@ vec3 reconstructHighlights(vec3 rgbNits, float refNits)
 {
     vec3 rel = rgbNits / max(refNits, 1.0);
     float peak = max(max(rel.r, rel.g), rel.b);
-    if (peak <= 0.98) {
+    if (peak <= 0.94) {
         return rgbNits;
     }
 
     float minChannel = min(rel.r, min(rel.g, rel.b));
-    float nearClip = step(0.98, peak);
+    float nearClip = smoothstep(0.94, 0.99, peak);
     float channelSpread = (peak - minChannel) / max(peak, 1e-4);
-    float clipMask = nearClip * step(0.05, channelSpread);
-    if (clipMask <= 0.0) {
+    float clipMask = nearClip * smoothstep(0.03, 0.08, channelSpread);
+    if (clipMask <= 1e-4) {
         return rgbNits;
     }
 
@@ -58,19 +58,78 @@ float expandShadowDetailRel(float t)
     return pow(u, 0.75) * span;
 }
 
-// Content-aware shoulder separation: stretch the top band upward into headroom.
-// Never pull highlights down — that left flat interiors darker than their edges.
-float expandHighlightDetailRel(float t)
+// C¹-continuous shoulder remap: guidance.r shapes the lift, guidance.g × strength blends.
+// Single pre-curve application — never pull highlights down. The remap stays within the
+// tone-curve LUT span (t ≤ 1.0) so it survives mapToneCurve's input clamp, and starts at
+// mid-highlights where the curve still has output headroom.
+float mapHighlightShoulderRel(float t, float expansion, float confidence, float strength)
 {
-    const float knee = 1.0 - 8.0 / 255.0;
-    const float kneeWidth = 8.0 / 255.0;
-    const float ceiling = 1.05;
-    if (t <= knee) {
+    float w = clamp(confidence, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4) {
         return t;
     }
-    float u = clamp((t - knee) / max(1.0 - knee, 1e-6), 0.0, 1.0);
-    float expanded = knee + pow(u, 0.75) * (ceiling - knee);
-    return mix(t, expanded, smoothstep(knee, knee + kneeWidth * 0.5, t));
+
+    const float kneeLo = 0.60;
+    const float kneeHi = 0.78;
+    float kneeW = smoothstep(kneeLo, kneeHi, t);
+    if (kneeW <= 0.0 || t >= 1.0) {
+        return t;
+    }
+
+    // guidance.r ∈ [1, 1.75] → lift exponent (pow < 1 lifts the band toward the span top).
+    float e = clamp((max(expansion, 1.0) - 1.0) / 0.75, 0.0, 1.0);
+    float k = mix(0.85, 0.40, e);
+    float u = clamp((t - kneeLo) / (1.0 - kneeLo), 0.0, 1.0);
+    float expanded = kneeLo + pow(u, k) * (1.0 - kneeLo);
+    return max(mix(t, expanded, kneeW * w), t);
+}
+
+vec3 applyHighlightShoulder(vec3 rgbNits, float refNits, float expansion, float confidence, float strength)
+{
+    float w = clamp(confidence, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float t = luma / max(refNits, 1.0);
+    float newT = mapHighlightShoulderRel(t, expansion, confidence, strength);
+    return rgbNits * (newT / max(t, 1e-6));
+}
+
+// Pre-curve highlight ramp decontour — breaks 8-bit steps before shoulder expansion.
+vec3 applyHighlightRampDecontour(vec3 rgbNits, float refNits, float highlightMask, float strength,
+                                 float localAvgNits, float localRangeNits)
+{
+    float w = clamp(highlightMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
+    if (w <= 1e-4 || localAvgNits <= 0.0) {
+        return rgbNits;
+    }
+
+    float luma = max(luminanceYNits(rgbNits), 1e-6);
+    float t = luma / max(refNits, 1.0);
+    float highlightBand = smoothstep(0.82, 0.94, t) * (1.0 - smoothstep(0.97, 1.02, t));
+    if (highlightBand <= 1e-4) {
+        return rgbNits;
+    }
+
+    float rangeRel = localRangeNits / max(refNits, 1.0);
+    const float lsb = 1.0 / 255.0;
+    float rampGrad = smoothstep(0.75 * lsb, 1.0 * lsb, rangeRel)
+        * (1.0 - smoothstep(1.75 * lsb, 2.25 * lsb, rangeRel));
+    float decontourW = rampGrad * highlightBand * w;
+    if (decontourW <= 1e-4) {
+        return rgbNits;
+    }
+
+    float avg = localAvgNits;
+    float dev = luma - avg;
+    float hint = sign(dev != 0.0 ? dev : 1.0)
+        * min(abs(dev), max(localRangeNits * 0.45, refNits * lsb));
+    float blend = mix(0.45, 0.70, highlightBand);
+    float targetDev = mix(dev, dev + hint * 0.75, decontourW * blend);
+    float newLuma = max(avg + targetDev, 1e-6);
+    return rgbNits * (newLuma / luma);
 }
 
 // Reconstruct smooth ramps under 8-bit quantization steps (mean-preserving).
@@ -133,23 +192,6 @@ vec3 applyShadowDetail(vec3 rgbNits, float refNits, float shadowMask, float stre
     float gain = mix(1.0, mix(1.7, 2.15, crushed), w * flatGate);
     float newLuma = max(avg + delta * gain, 1e-6);
     return rgbNits * (newLuma / luma);
-}
-
-vec3 applyHighlightDetail(vec3 rgbNits, float refNits, float highlightMask, float strength)
-{
-    float w = clamp(highlightMask, 0.0, 1.0) * clamp(strength, 0.0, 1.0);
-    if (w <= 1e-4) {
-        return rgbNits;
-    }
-
-    float luma = max(luminanceYNits(rgbNits), 1e-6);
-    float t = luma / max(refNits, 1.0);
-    float expanded = expandHighlightDetailRel(t);
-    float newT = mix(t, expanded, w);
-    float scale = newT / max(t, 1e-6);
-    // Never darken: interiors have higher guidance.g and would otherwise go dimmer than edges.
-    scale = mix(1.0, clamp(scale, 1.0, 1.5), w);
-    return rgbNits * scale;
 }
 
 // Multi-scale local contrast / perceptual depth (edge-aware).

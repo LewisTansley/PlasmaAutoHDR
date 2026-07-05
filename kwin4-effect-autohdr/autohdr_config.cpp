@@ -4,7 +4,9 @@
 #include "tone_curve.h"
 
 #include <KConfigGroup>
+#include <QDir>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <cmath>
 
 namespace AutoHdr {
@@ -90,6 +92,31 @@ int aiInferenceInterval(AiQuality quality)
     }
 }
 
+QSize aiOrtInferenceSize(AiQuality quality)
+{
+    switch (quality) {
+    case AiQuality::Performance:
+        return QSize(128, 128);
+    case AiQuality::Quality:
+        return QSize(256, 256);
+    case AiQuality::Balanced:
+    default:
+        return QSize(192, 192);
+    }
+}
+
+int aiOrtSubmitInterval(AiQuality quality)
+{
+    switch (quality) {
+    case AiQuality::Performance:
+        return 2;
+    case AiQuality::Quality:
+    case AiQuality::Balanced:
+    default:
+        return 1;
+    }
+}
+
 QString aiQualityToString(AiQuality quality)
 {
     switch (quality) {
@@ -136,6 +163,143 @@ AiBackend aiBackendFromString(const QString &value)
         return AiBackend::GlslOnly;
     }
     return AiBackend::Auto;
+}
+
+AiGuidanceModel clampAiGuidanceModel(int value)
+{
+    return static_cast<AiGuidanceModel>(qBound(0, value, 3));
+}
+
+QString aiGuidanceModelToString(AiGuidanceModel model)
+{
+    switch (model) {
+    case AiGuidanceModel::GuidanceV2:
+        return QStringLiteral("GuidanceV2");
+    case AiGuidanceModel::GuidanceV1:
+        return QStringLiteral("GuidanceV1");
+    case AiGuidanceModel::GuidanceV0:
+        return QStringLiteral("GuidanceV0");
+    case AiGuidanceModel::Latest:
+    default:
+        return QStringLiteral("Latest");
+    }
+}
+
+AiGuidanceModel aiGuidanceModelFromString(const QString &value)
+{
+    if (value.compare(QStringLiteral("GuidanceV2"), Qt::CaseInsensitive) == 0) {
+        return AiGuidanceModel::GuidanceV2;
+    }
+    if (value.compare(QStringLiteral("GuidanceV1"), Qt::CaseInsensitive) == 0) {
+        return AiGuidanceModel::GuidanceV1;
+    }
+    if (value.compare(QStringLiteral("GuidanceV0"), Qt::CaseInsensitive) == 0) {
+        return AiGuidanceModel::GuidanceV0;
+    }
+    return AiGuidanceModel::Latest;
+}
+
+QString locateEffectDataFile(const QString &relativePath)
+{
+    const QStringList candidates =
+        QStandardPaths::locateAll(QStandardPaths::GenericDataLocation, relativePath);
+    for (const QString &path : candidates) {
+        if (!path.startsWith(QDir::homePath())) {
+            return path;
+        }
+    }
+    return candidates.isEmpty() ? QString() : candidates.constFirst();
+}
+
+namespace {
+
+constexpr const char *kGuidanceModelsDir = "kwin/effects/autohdr/models/";
+
+QString guidanceModelRelativePath(const QString &fileName)
+{
+    return QString::fromLatin1(kGuidanceModelsDir) + fileName;
+}
+
+const QVector<GuidanceModelDescriptor> &registeredGuidanceModels()
+{
+    static const QVector<GuidanceModelDescriptor> models = {
+        {AiGuidanceModel::GuidanceV2,
+         2,
+         QStringLiteral("guidance_v2.onnx"),
+         QStringLiteral("Guidance v2 — trained neural"),
+         false,
+         true},
+        {AiGuidanceModel::GuidanceV1,
+         1,
+         QStringLiteral("guidance_v1.onnx"),
+         QStringLiteral("Guidance v1 — formula (GPU)"),
+         true,
+         false},
+        {AiGuidanceModel::GuidanceV0,
+         0,
+         QStringLiteral("guidance_v0.onnx"),
+         QStringLiteral("Guidance v0 — legacy"),
+         true,
+         false},
+    };
+    return models;
+}
+
+const GuidanceModelDescriptor *descriptorForModel(AiGuidanceModel model)
+{
+    if (model == AiGuidanceModel::Latest) {
+        return nullptr;
+    }
+    for (const GuidanceModelDescriptor &descriptor : registeredGuidanceModels()) {
+        if (descriptor.id == model) {
+            return &descriptor;
+        }
+    }
+    return nullptr;
+}
+
+QString resolveLatestGuidanceModelPath()
+{
+    for (const GuidanceModelDescriptor &descriptor : registeredGuidanceModels()) {
+        const QString path = locateEffectDataFile(guidanceModelRelativePath(descriptor.fileName));
+        if (!path.isEmpty()) {
+            return path;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+QVector<GuidanceModelDescriptor> guidanceModelDescriptors()
+{
+    return registeredGuidanceModels();
+}
+
+QString resolveGuidanceModelPath(AiGuidanceModel model)
+{
+    if (model == AiGuidanceModel::Latest) {
+        return resolveLatestGuidanceModelPath();
+    }
+
+    const GuidanceModelDescriptor *descriptor = descriptorForModel(model);
+    if (!descriptor) {
+        return resolveLatestGuidanceModelPath();
+    }
+    return locateEffectDataFile(guidanceModelRelativePath(descriptor->fileName));
+}
+
+std::optional<GuidanceModelDescriptor> guidanceModelFromPath(const QString &modelPath)
+{
+    if (modelPath.isEmpty()) {
+        return std::nullopt;
+    }
+    for (const GuidanceModelDescriptor &descriptor : registeredGuidanceModels()) {
+        if (modelPath.contains(descriptor.fileName)) {
+            return descriptor;
+        }
+    }
+    return std::nullopt;
 }
 
 namespace {
@@ -264,6 +428,8 @@ GeneralSettings loadGeneralSettings(const KSharedConfigPtr &config)
     general.aiStrength = clampAiStrength(group.readEntry("AiStrength", 0.5f));
     general.aiQuality = aiQualityFromString(group.readEntry("AiQuality", QStringLiteral("Balanced")));
     general.aiBackend = aiBackendFromString(group.readEntry("AiBackend", QStringLiteral("Auto")));
+    general.aiGuidanceModel =
+        aiGuidanceModelFromString(group.readEntry("AiGuidanceModel", QStringLiteral("Latest")));
     general.aiBandingStrength = clampAiBandingStrength(group.readEntry("AiBandingStrength", 0.7f));
     return general;
 }
@@ -280,6 +446,7 @@ void saveGeneralSettings(const KSharedConfigPtr &config, const GeneralSettings &
     group.writeEntry("AiStrength", general.aiStrength);
     group.writeEntry("AiQuality", aiQualityToString(general.aiQuality));
     group.writeEntry("AiBackend", aiBackendToString(general.aiBackend));
+    group.writeEntry("AiGuidanceModel", aiGuidanceModelToString(general.aiGuidanceModel));
     group.writeEntry("AiBandingStrength", general.aiBandingStrength);
     config->sync();
 }

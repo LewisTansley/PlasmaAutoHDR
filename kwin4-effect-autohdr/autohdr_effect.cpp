@@ -19,8 +19,10 @@
 #include <opengl/glvertexbuffer.h>
 #include <scene/item.h>
 #include <scene/itemgeometry.h>
+#include <scene/surfaceitem.h>
 #include <scene/windowitem.h>
 #include <scene/scene.h>
+#include <wayland/surface.h>
 #include <window.h>
 #include <workspace.h>
 #include <QAction>
@@ -75,15 +77,10 @@ HdrDisplayLimits readHdrDisplayLimits()
     return limits;
 }
 
-QString locateEffectDataFile(const QString &relativePath)
+bool debugPaintEnabled()
 {
-    const QStringList candidates = QStandardPaths::locateAll(QStandardPaths::GenericDataLocation, relativePath);
-    for (const QString &path : candidates) {
-        if (!path.startsWith(QDir::homePath())) {
-            return path;
-        }
-    }
-    return candidates.isEmpty() ? QString() : candidates.constFirst();
+    static const bool enabled = qEnvironmentVariableIsSet("AUTOHDR_DEBUG_PAINT");
+    return enabled;
 }
 
 } // namespace
@@ -152,11 +149,18 @@ namespace KWin {
             if (w == m_calibratingWindow) {
                 closeCalibrationOverlay(false);
             }
+            ensureCompositorHeartbeat();
+        });
+
+        m_compositorHeartbeat.setInterval(16);
+        m_compositorHeartbeat.setTimerType(Qt::PreciseTimer);
+        connect(&m_compositorHeartbeat, &QTimer::timeout, this, [this]() {
+            onCompositorHeartbeat();
         });
 
         connectOutputTracking();
 
-        const QString shaderPath = locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/autohdr.frag"));
+        const QString shaderPath = AutoHdr::locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/autohdr.frag"));
         if (shaderPath.isEmpty()) {
             qWarning() << "AutoHDR Effect: fragment shader not found";
             return;
@@ -173,6 +177,7 @@ namespace KWin {
 
     AutoHDREffect::~AutoHDREffect()
     {
+        m_compositorHeartbeat.stop();
         if (m_guidanceWorker) {
             m_guidanceWorker->shutdown();
             m_guidanceWorker.reset();
@@ -189,6 +194,11 @@ namespace KWin {
             removeStatusToast(window);
         }
         if (effects->makeOpenGLContextCurrent()) {
+            if (m_ortPbo[0] != 0) {
+                glDeleteBuffers(2, m_ortPbo);
+                m_ortPbo[0] = 0;
+                m_ortPbo[1] = 0;
+            }
             QList<EffectWindow *> redirected;
             for (const auto &entry : m_offscreenWindows) {
                 redirected.append(entry.first);
@@ -392,6 +402,7 @@ namespace KWin {
         m_aiBandingStrengthGlobal = general.aiBandingStrength;
         m_aiQuality = general.aiQuality;
         m_aiBackend = general.aiBackend;
+        m_aiGuidanceModel = general.aiGuidanceModel;
         m_globalDefaults.aiEnhanced = general.aiEnhanced;
         m_globalDefaults.aiStrength = general.aiStrength;
         if (qEnvironmentVariableIsSet("AUTOHDR_AI_QUALITY")) {
@@ -412,6 +423,7 @@ namespace KWin {
         initGuidanceInference();
         invalidateAllGuidance();
         m_loggedGuidanceBackend = false;
+        m_loggedAiResourcesFailure = false;
         m_redirectInternalFormat = 0;
     }
 
@@ -592,9 +604,8 @@ namespace KWin {
             m_shader->setUniform(m_locEnableSpatialAvgPreCurve, enablePreCurve);
         }
         if (m_locAiStrength >= 0) {
-            const float strength = settings.aiEnhanced ? settings.aiStrength
-                : (m_aiEnabledGlobal ? m_aiStrengthGlobal : settings.aiStrength);
-            m_shader->setUniform(m_locAiStrength, AutoHdr::clampAiStrength(strength));
+            m_shader->setUniform(m_locAiStrength,
+                                 shouldUseAi(settings) ? AutoHdr::clampAiStrength(settings.aiStrength) : 0.0f);
         }
         if (m_locAiEnhanced >= 0) {
             m_shader->setUniform(m_locAiEnhanced, shouldUseAi(settings) ? 1 : 0);
@@ -708,7 +719,10 @@ namespace KWin {
             return m_redirectInternalFormat;
         }
 
-        const bool wantFloat = qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO") || m_aiEnabledGlobal;
+        const bool wantFloat =
+            qEnvironmentVariableIsSet("AUTOHDR_FLOAT_FBO")
+            || (m_aiEnabledGlobal && !m_aiForceDisabled)
+            || (m_perceptualColorEnabled && !m_aiForceDisabled);
         m_redirectInternalFormat = GL_RGBA8;
         if (wantFloat) {
             if (auto probe = GLTexture::allocate(GL_RGBA16F, QSize(4, 4))) {
@@ -730,23 +744,25 @@ namespace KWin {
         }
         if (qEnvironmentVariableIsSet("AUTOHDR_ONNX_V2")
             && qEnvironmentVariableIntValue("AUTOHDR_ONNX_V2") != 0) {
-            const QString v2 =
-                locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v2.onnx"));
+            const QString v2 = AutoHdr::resolveGuidanceModelPath(AutoHdr::AiGuidanceModel::GuidanceV2);
             if (!v2.isEmpty()) {
                 return v2;
             }
         }
-        const QString v1 =
-            locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v1.onnx"));
-        if (!v1.isEmpty()) {
-            return v1;
+
+        const QString configured = AutoHdr::resolveGuidanceModelPath(m_aiGuidanceModel);
+        if (!configured.isEmpty()) {
+            return configured;
         }
-        return locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/models/guidance_v0.onnx"));
+
+        return AutoHdr::resolveGuidanceModelPath(AutoHdr::AiGuidanceModel::Latest);
     }
 
     bool AutoHDREffect::isGuidanceV2Model(const QString &modelPath) const
     {
-        return modelPath.contains(QStringLiteral("guidance_v2"));
+        const std::optional<AutoHdr::GuidanceModelDescriptor> descriptor =
+            AutoHdr::guidanceModelFromPath(modelPath);
+        return descriptor && descriptor->usesAsyncOrt;
     }
 
     void AutoHDREffect::initGuidanceInference()
@@ -755,7 +771,8 @@ namespace KWin {
             m_guidanceWorker->shutdown();
             m_guidanceWorker.reset();
         }
-        m_guidanceAsyncPending = false;
+        m_asyncGuidanceGeneration = 0;
+        m_asyncGuidanceTarget = nullptr;
 
         if (m_aiForceDisabled) {
             m_guidanceInference.reset();
@@ -773,7 +790,8 @@ namespace KWin {
             m_guidanceWorker->start();
             if (!m_loggedV2Active) {
                 m_loggedV2Active = true;
-                qInfo() << "AutoHDR Effect: guidance_v2 active (AUTOHDR_ONNX_V2=1), async ORT on" << modelPath;
+                qInfo() << "AutoHDR Effect: async guidance active for"
+                        << AutoHdr::aiGuidanceModelToString(m_aiGuidanceModel) << modelPath;
             }
             qInfo() << "AutoHDR Effect: async guidance worker started for" << modelPath;
         }
@@ -798,14 +816,184 @@ namespace KWin {
                      qMax(1, static_cast<int>(size.height() * scale)));
     }
 
+    bool AutoHDREffect::shouldSubmitOrt(OffscreenWindowData *offscreenData)
+    {
+        if (!offscreenData || !offscreenData->contentDamaged) {
+            return false;
+        }
+        if (m_frameBudgetSkipOrt) {
+            return false;
+        }
+        const int interval = AutoHdr::aiOrtSubmitInterval(m_aiQuality);
+        if (interval > 1 && (m_guidanceFrameCounter % interval) != 0) {
+            return false;
+        }
+        return !m_guidanceWorker || !m_guidanceWorker->hasInflightWork();
+    }
+
+    void AutoHDREffect::ensureOrtPbo(int mapW, int mapH)
+    {
+        const size_t byteSize = static_cast<size_t>(mapW) * mapH * 4 * sizeof(float);
+        if (m_ortPbo[0] == 0) {
+            glGenBuffers(2, m_ortPbo);
+        }
+        for (GLuint pbo : m_ortPbo) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+            glBufferData(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(byteSize), nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    }
+
+    void AutoHDREffect::finishPendingOrtReadback()
+    {
+        if (!m_ortPboReadPending || !m_ortPboReadTarget || m_ortPboReadW <= 0 || m_ortPboReadH <= 0
+            || !m_guidanceWorker) {
+            m_ortPboReadPending = false;
+            return;
+        }
+
+        const int readIndex = 1 - m_ortPboWriteIndex;
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_ortPbo[readIndex]);
+        void *mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (!mapped) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            m_ortPboReadPending = false;
+            return;
+        }
+
+        const size_t pixelCount = static_cast<size_t>(m_ortPboReadW) * m_ortPboReadH;
+        m_downsampleReadback.resize(pixelCount * 3);
+        const float *rgba = static_cast<const float *>(mapped);
+        for (size_t i = 0; i < pixelCount; ++i) {
+            m_downsampleReadback[i * 3 + 0] = rgba[i * 4 + 0];
+            m_downsampleReadback[i * 3 + 1] = rgba[i * 4 + 1];
+            m_downsampleReadback[i * 3 + 2] = rgba[i * 4 + 2];
+        }
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+        m_asyncGuidanceGeneration =
+            m_guidanceWorker->submit(m_downsampleReadback.data(), m_ortPboReadW, m_ortPboReadH);
+        m_asyncGuidanceTarget = m_ortPboReadTarget;
+        m_ortPboReadPending = false;
+    }
+
+    void AutoHDREffect::issueOrtInputReadback(OffscreenWindowData *offscreenData, int mapW, int mapH)
+    {
+        if (!offscreenData || !offscreenData->ortInputFbo || mapW <= 0 || mapH <= 0) {
+            return;
+        }
+
+        ensureOrtPbo(mapW, mapH);
+        GLFramebuffer::pushFramebuffer(offscreenData->ortInputFbo.get());
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_ortPbo[m_ortPboWriteIndex]);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_FLOAT, 0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        GLFramebuffer::popFramebuffer();
+
+        m_ortPboWriteIndex = 1 - m_ortPboWriteIndex;
+        m_ortPboReadPending = true;
+        m_ortPboReadTarget = offscreenData;
+        m_ortPboReadW = mapW;
+        m_ortPboReadH = mapH;
+    }
+
+    bool AutoHDREffect::readOrtInputRgb(OffscreenWindowData *offscreenData, int mapW, int mapH)
+    {
+        if (!offscreenData || !offscreenData->ortInputFbo || mapW <= 0 || mapH <= 0) {
+            return false;
+        }
+
+        GLFramebuffer::pushFramebuffer(offscreenData->ortInputFbo.get());
+        const size_t pixelCount = static_cast<size_t>(mapW) * mapH;
+        m_downsampleReadbackFloat.resize(pixelCount * 4);
+        m_downsampleReadback.resize(pixelCount * 3);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, mapW, mapH, GL_RGBA, GL_FLOAT, m_downsampleReadbackFloat.data());
+        for (size_t i = 0; i < pixelCount; ++i) {
+            m_downsampleReadback[i * 3 + 0] = m_downsampleReadbackFloat[i * 4 + 0];
+            m_downsampleReadback[i * 3 + 1] = m_downsampleReadbackFloat[i * 4 + 1];
+            m_downsampleReadback[i * 3 + 2] = m_downsampleReadbackFloat[i * 4 + 2];
+        }
+        GLFramebuffer::popFramebuffer();
+        return true;
+    }
+
+    void AutoHDREffect::renderGuidanceBlendPass(OffscreenWindowData *offscreenData, int mapW, int mapH)
+    {
+        if (!offscreenData || !offscreenData->guidanceFbo || !offscreenData->ortOutputTexture
+            || !offscreenData->guidanceTexture || !offscreenData->guidanceScratchFbo
+            || !m_guidanceBlendShader || !m_downsampleShader) {
+            return;
+        }
+
+        renderTexturePass(offscreenData->guidanceTexture.get(), offscreenData->guidanceScratchFbo.get(),
+                          m_downsampleShader.get(), offscreenData->guidanceSize, mapW, mapH);
+
+        GLFramebuffer::pushFramebuffer(offscreenData->guidanceFbo.get());
+        glViewport(0, 0, mapW, mapH);
+
+        ShaderBinder binder(m_guidanceBlendShader.get());
+        QMatrix4x4 mvp;
+        mvp.ortho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
+        m_guidanceBlendShader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
+
+        const int glslLoc = m_guidanceBlendShader->uniformLocation("glslSampler");
+        if (glslLoc >= 0) {
+            glActiveTexture(GL_TEXTURE1);
+            offscreenData->guidanceScratchTexture->bind();
+            m_guidanceBlendShader->setUniform(glslLoc, 1);
+            glActiveTexture(GL_TEXTURE0);
+        }
+
+        offscreenData->ortOutputTexture->bind();
+
+        GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+        vbo->reset();
+        vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
+        const auto map = vbo->map<GLVertex2D>(4);
+        if (!map) {
+            GLFramebuffer::popFramebuffer();
+            return;
+        }
+        (*map)[0] = GLVertex2D{QVector2D(-1.0f, -1.0f), QVector2D(0.0f, 0.0f)};
+        (*map)[1] = GLVertex2D{QVector2D(1.0f, -1.0f), QVector2D(1.0f, 0.0f)};
+        (*map)[2] = GLVertex2D{QVector2D(-1.0f, 1.0f), QVector2D(0.0f, 1.0f)};
+        (*map)[3] = GLVertex2D{QVector2D(1.0f, 1.0f), QVector2D(1.0f, 1.0f)};
+        vbo->unmap();
+        vbo->bindArrays();
+        vbo->draw(Region::infinite(), GL_TRIANGLE_STRIP, 0, 4, false);
+        vbo->unbindArrays();
+        offscreenData->ortOutputTexture->unbind();
+        GLFramebuffer::popFramebuffer();
+    }
+
+    void AutoHDREffect::uploadOrtOutputAndBlend(OffscreenWindowData *offscreenData, const float *rgba, int ortW,
+                                                int ortH)
+    {
+        if (!offscreenData || !offscreenData->ortOutputTexture || !rgba || ortW <= 0 || ortH <= 0) {
+            return;
+        }
+
+        offscreenData->ortOutputTexture->bind();
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ortW, ortH, GL_RGBA, GL_FLOAT, rgba);
+        offscreenData->ortOutputTexture->unbind();
+
+        const int mapW = offscreenData->guidanceSize.width();
+        const int mapH = offscreenData->guidanceSize.height();
+        renderGuidanceBlendPass(offscreenData, mapW, mapH);
+        offscreenData->guidanceValid = true;
+        offscreenData->guidanceEverUploaded = true;
+    }
+
     void AutoHDREffect::pollAsyncGuidanceResults()
     {
         if (!m_guidanceWorker) {
             return;
         }
 
-        if (m_guidanceAsyncPending && m_guidanceWorker->takeFailedJob()) {
-            m_guidanceAsyncPending = false;
+        if (m_guidanceWorker->takeFailedJob()) {
             m_asyncGuidanceTarget = nullptr;
             if (!m_loggedAsyncFailure) {
                 m_loggedAsyncFailure = true;
@@ -817,22 +1005,18 @@ namespace KWin {
         std::vector<float> rgba;
         int width = 0;
         int height = 0;
-        if (!m_guidanceWorker->tryTakeResult(&rgba, &width, &height)) {
+        uint64_t resultGeneration = 0;
+        if (!m_guidanceWorker->tryTakeResult(&rgba, &width, &height, &resultGeneration)) {
             return;
         }
 
-        m_guidanceAsyncPending = false;
         OffscreenWindowData *target = m_asyncGuidanceTarget;
-        m_asyncGuidanceTarget = nullptr;
-
-        if (!target || !target->guidanceTexture || target->guidanceSize.width() != width
-            || target->guidanceSize.height() != height) {
+        if (!target || resultGeneration != m_asyncGuidanceGeneration || !target->guidanceTexture
+            || target->ortInferenceSize.width() != width || target->ortInferenceSize.height() != height) {
             return;
         }
 
-        blendGuidanceWithGlslFloor(rgba);
-        uploadGuidanceTexture(target, rgba.data(), width, height);
-        target->needsGuidanceUpdate = false;
+        uploadOrtOutputAndBlend(target, rgba.data(), width, height);
     }
 
     void AutoHDREffect::invalidateAllGuidance()
@@ -874,10 +1058,10 @@ namespace KWin {
 
     bool AutoHDREffect::shouldUseAi(const CalibrationSettings &settings) const
     {
-        if (m_aiForceDisabled) {
+        if (m_aiForceDisabled || !m_aiEnabledGlobal) {
             return false;
         }
-        return settings.aiEnhanced || m_aiEnabledGlobal;
+        return settings.aiEnhanced;
     }
 
     bool AutoHDREffect::preferOnnxGuidance() const
@@ -904,9 +1088,12 @@ namespace KWin {
             return false;
         }
         const QString modelPath = resolveOnnxModelPath();
-        // guidance_v0/v1 formulas run on the GPU (same as autohdr_guidance.frag).
-        return modelPath.isEmpty() || modelPath.contains(QStringLiteral("guidance_v0"))
-            || modelPath.contains(QStringLiteral("guidance_v1"));
+        const std::optional<AutoHdr::GuidanceModelDescriptor> descriptor =
+            AutoHdr::guidanceModelFromPath(modelPath);
+        if (descriptor) {
+            return descriptor->usesGlslFormula;
+        }
+        return modelPath.isEmpty();
     }
 
     bool AutoHDREffect::useOnnxOrtReadback() const
@@ -917,7 +1104,7 @@ namespace KWin {
 
     QByteArray AutoHDREffect::loadSimpleShaderSource(const QString &fileName) const
     {
-        const QString path = locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/") + fileName);
+        const QString path = AutoHdr::locateEffectDataFile(QStringLiteral("kwin/effects/autohdr/") + fileName);
         if (path.isEmpty()) {
             return {};
         }
@@ -956,6 +1143,17 @@ namespace KWin {
             }
         }
 
+        if (!m_guidanceBlendShader) {
+            const QByteArray source = loadSimpleShaderSource(QStringLiteral("autohdr_guidance_blend.frag"));
+            if (!source.isEmpty()) {
+                m_guidanceBlendShader =
+                    ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(), source);
+            }
+            if (!m_guidanceBlendShader) {
+                qWarning() << "AutoHDR Effect: failed to compile guidance blend shader";
+            }
+        }
+
         if (!m_neutralGuidanceTexture) {
             m_neutralGuidanceTexture = GLTexture::allocate(GL_RGBA16F, QSize(1, 1));
             if (!m_neutralGuidanceTexture) {
@@ -986,7 +1184,8 @@ namespace KWin {
 
         const int scale = AutoHdr::aiGuidanceScale(m_aiQuality);
         QSize guidanceSize(qMax(1, windowSize.width() / scale), qMax(1, windowSize.height() / scale));
-        if (useOnnxOrtReadback()) {
+        const bool asyncV2 = useAsyncGuidanceInference();
+        if (useOnnxOrtReadback() && !asyncV2) {
             const QSize capped = capGuidanceSizeForOrt(guidanceSize);
             if (capped != guidanceSize) {
                 if (!m_loggedOrtCapWarning) {
@@ -997,15 +1196,24 @@ namespace KWin {
                 guidanceSize = capped;
             }
         }
+        const QSize ortSize = asyncV2 ? AutoHdr::aiOrtInferenceSize(m_aiQuality) : QSize();
         if (offscreenData->guidanceSize != guidanceSize) {
             offscreenData->downsampleTexture.reset();
             offscreenData->downsampleFbo.reset();
             offscreenData->guidanceTexture.reset();
             offscreenData->guidanceFbo.reset();
+            offscreenData->guidanceScratchTexture.reset();
+            offscreenData->guidanceScratchFbo.reset();
             offscreenData->guidanceValid = false;
             offscreenData->guidanceEverUploaded = false;
             offscreenData->needsGuidanceUpdate = true;
             offscreenData->guidanceSize = guidanceSize;
+        }
+        if (asyncV2 && offscreenData->ortInferenceSize != ortSize) {
+            offscreenData->ortInputTexture.reset();
+            offscreenData->ortInputFbo.reset();
+            offscreenData->ortOutputTexture.reset();
+            offscreenData->ortInferenceSize = ortSize;
         }
 
         if (!offscreenData->downsampleTexture) {
@@ -1035,6 +1243,41 @@ namespace KWin {
             offscreenData->guidanceTexture->setFilter(GL_LINEAR);
             offscreenData->guidanceTexture->setWrapMode(GL_CLAMP_TO_EDGE);
             offscreenData->guidanceFbo = std::make_unique<GLFramebuffer>(offscreenData->guidanceTexture.get());
+
+            offscreenData->guidanceScratchTexture = GLTexture::allocate(GL_RGBA16F, guidanceSize);
+            if (!offscreenData->guidanceScratchTexture) {
+                offscreenData->guidanceScratchTexture = GLTexture::allocate(GL_RGBA8, guidanceSize);
+            }
+            if (offscreenData->guidanceScratchTexture) {
+                offscreenData->guidanceScratchTexture->setFilter(GL_LINEAR);
+                offscreenData->guidanceScratchTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+                offscreenData->guidanceScratchFbo =
+                    std::make_unique<GLFramebuffer>(offscreenData->guidanceScratchTexture.get());
+            }
+        }
+
+        if (asyncV2 && ortSize.isValid() && !offscreenData->ortInputTexture) {
+            offscreenData->ortInputTexture = GLTexture::allocate(GL_RGBA16F, ortSize);
+            if (!offscreenData->ortInputTexture) {
+                offscreenData->ortInputTexture = GLTexture::allocate(GL_RGBA8, ortSize);
+            }
+            if (!offscreenData->ortInputTexture) {
+                return false;
+            }
+            offscreenData->ortInputTexture->setFilter(GL_LINEAR);
+            offscreenData->ortInputTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+            offscreenData->ortInputFbo =
+                std::make_unique<GLFramebuffer>(offscreenData->ortInputTexture.get());
+
+            offscreenData->ortOutputTexture = GLTexture::allocate(GL_RGBA16F, ortSize);
+            if (!offscreenData->ortOutputTexture) {
+                offscreenData->ortOutputTexture = GLTexture::allocate(GL_RGBA8, ortSize);
+            }
+            if (!offscreenData->ortOutputTexture) {
+                return false;
+            }
+            offscreenData->ortOutputTexture->setFilter(GL_LINEAR);
+            offscreenData->ortOutputTexture->setWrapMode(GL_CLAMP_TO_EDGE);
         }
 
         return true;
@@ -1162,13 +1405,14 @@ namespace KWin {
         return true;
     }
 
-    void AutoHDREffect::blendGuidanceWithGlslFloor(std::vector<float> &rgba) const
+    void AutoHDREffect::blendGuidanceWithGlslFloor(std::vector<float> &rgba,
+                                                   const std::vector<float> &glslFloor) const
     {
-        if (m_glslGuidanceFloor.size() != rgba.size()) {
+        if (glslFloor.size() != rgba.size()) {
             return;
         }
         for (size_t i = 0; i < rgba.size() / 4; ++i) {
-            rgba[i * 4 + 3] = std::max(rgba[i * 4 + 3], m_glslGuidanceFloor[i * 4 + 3]);
+            rgba[i * 4 + 3] = std::max(rgba[i * 4 + 3], glslFloor[i * 4 + 3]);
         }
     }
 
@@ -1185,14 +1429,34 @@ namespace KWin {
             return;
         }
         if (!ensureAiResources(offscreenData, windowSize)) {
+            if (!m_loggedAiResourcesFailure) {
+                m_loggedAiResourcesFailure = true;
+                qWarning() << "AutoHDR Effect: AI resources unavailable"
+                           << "(downsample=" << (m_downsampleShader != nullptr)
+                           << "guidance=" << (m_guidanceShader != nullptr)
+                           << "blend=" << (m_guidanceBlendShader != nullptr) << ")";
+            }
             return;
         }
 
+        const bool asyncV2 =
+            useAsyncGuidanceInference() && m_guidanceWorker && offscreenData->downsampleFbo;
+
         if (offscreenData->guidanceValid && !offscreenData->needsGuidanceUpdate) {
-            const int staticInterval = AutoHdr::aiInferenceInterval(m_aiQuality);
-            if (staticInterval <= 1 || (m_guidanceFrameCounter % staticInterval) != 0) {
+            if (!asyncV2) {
+                const int staticInterval = AutoHdr::aiInferenceInterval(m_aiQuality);
+                if (staticInterval <= 1 || (m_guidanceFrameCounter % staticInterval) != 0) {
+                    return;
+                }
+            } else {
                 return;
             }
+        }
+
+        if (asyncV2 && offscreenData->guidanceValid && offscreenData->needsGuidanceUpdate
+            && !offscreenData->contentDamaged) {
+            offscreenData->needsGuidanceUpdate = false;
+            return;
         }
 
         const QSize guidanceSize = offscreenData->guidanceSize;
@@ -1208,7 +1472,7 @@ namespace KWin {
             analysisSource = offscreenData->downsampleTexture.get();
         }
 
-        // GLSL v1.5 bootstrap: always produce a valid guidance map this frame.
+        // GLSL v1.5 bootstrap: produce a valid guidance map when content changes or on interval refresh.
         renderTexturePass(analysisSource, offscreenData->guidanceFbo.get(), m_guidanceShader.get(), guidanceSize,
                           mapW, mapH);
         offscreenData->guidanceValid = true;
@@ -1220,18 +1484,18 @@ namespace KWin {
             qInfo() << "AutoHDR Effect: AI guidance active via" << activeGuidanceBackendLabel();
         }
 
-        // Optional v2 async ORT refinement (GLSL map remains visible while pending).
-        if (useAsyncGuidanceInference() && m_guidanceWorker && offscreenData->downsampleFbo) {
-            if (m_guidanceAsyncPending) {
-                return;
+        // Optional v2 async ORT refinement (GLSL map is current; ORT applied only when fresh).
+        if (asyncV2) {
+            const int ortW = offscreenData->ortInferenceSize.width();
+            const int ortH = offscreenData->ortInferenceSize.height();
+            if (ortW > 0 && ortH > 0 && offscreenData->ortInputFbo) {
+                renderTexturePass(offscreenData->texture.get(), offscreenData->ortInputFbo.get(),
+                                  m_downsampleShader.get(), offscreenData->ortInferenceSize, ortW, ortH);
+                if (shouldSubmitOrt(offscreenData)) {
+                    issueOrtInputReadback(offscreenData, ortW, ortH);
+                    offscreenData->contentDamaged = false;
+                }
             }
-            if (!readDownsampleRgb(offscreenData, mapW, mapH)) {
-                return;
-            }
-            readGuidanceMapRgba(offscreenData, mapW, mapH, m_glslGuidanceFloor);
-            m_guidanceWorker->submit(m_downsampleReadback.data(), mapW, mapH);
-            m_guidanceAsyncPending = true;
-            m_asyncGuidanceTarget = offscreenData;
             return;
         }
 
@@ -1245,11 +1509,91 @@ namespace KWin {
             m_guidanceUpload.resize(pixelCount * 4);
             if (m_guidanceInference->run(m_downsampleReadback.data(), mapW, mapH, m_guidanceUpload.data())) {
                 readGuidanceMapRgba(offscreenData, mapW, mapH, m_glslGuidanceFloor);
-                blendGuidanceWithGlslFloor(m_guidanceUpload);
+                blendGuidanceWithGlslFloor(m_guidanceUpload, m_glslGuidanceFloor);
                 uploadGuidanceTexture(offscreenData, m_guidanceUpload.data(), mapW, mapH);
                 return;
             }
             qWarning() << "AutoHDR Effect: ONNX guidance failed; keeping GLSL formula map";
+        }
+    }
+
+    void AutoHDREffect::scheduleActiveHdrRepaints()
+    {
+        constexpr qint64 kGuidanceHeartbeatMs = 33;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
+            EffectWindow *window = it.key();
+            if (!window || !AutoHdr::windowOnHdrOutput(window)) {
+                continue;
+            }
+
+            const auto offIt = m_offscreenWindows.find(window);
+            if (offIt != m_offscreenWindows.end()) {
+                OffscreenWindowData *offscreenData = offIt->second.get();
+                const bool heartbeat =
+                    offscreenData->lastCaptureMs == 0
+                    || (now - offscreenData->lastCaptureMs) >= kGuidanceHeartbeatMs;
+                if (heartbeat && !offscreenData->isDirty) {
+                    offscreenData->isDirty = true;
+                }
+            }
+        }
+    }
+
+    bool AutoHDREffect::anyActiveHdrWindow() const
+    {
+        for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
+            if (it.key() && AutoHdr::windowOnHdrOutput(it.key())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void AutoHDREffect::ensureCompositorHeartbeat()
+    {
+        if (m_activeWindows.isEmpty()) {
+            m_compositorHeartbeat.stop();
+            return;
+        }
+        if (!m_compositorHeartbeat.isActive()) {
+            m_compositorHeartbeat.start();
+        }
+    }
+
+    void AutoHDREffect::onCompositorHeartbeat()
+    {
+        if (m_activeWindows.isEmpty()) {
+            m_compositorHeartbeat.stop();
+            return;
+        }
+
+        bool needsGlobalRepaint = false;
+        for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
+            EffectWindow *window = it.key();
+            if (!window || !AutoHdr::windowOnHdrOutput(window)) {
+                continue;
+            }
+
+            if (isBrowserWindow(window)) {
+                const auto offIt = m_offscreenWindows.find(window);
+                if (offIt != m_offscreenWindows.end()) {
+                    ensureWindowRedirect(window, offIt->second.get());
+                }
+                if (WindowItem *windowItem = window->windowItem()) {
+                    windowItem->scheduleSceneRepaint(windowItem->boundingRect());
+                    if (SurfaceItem *surfaceItem = windowItem->surfaceItem()) {
+                        surfaceItem->scheduleSceneRepaint(surfaceItem->boundingRect());
+                    }
+                }
+            }
+
+            window->addRepaintFull();
+            effects->addRepaint(window->expandedGeometry());
+            needsGlobalRepaint = true;
+        }
+        if (needsGlobalRepaint) {
+            effects->addRepaintFull();
         }
     }
 
@@ -1407,6 +1751,206 @@ namespace KWin {
         unredirect(window);
     }
 
+    bool AutoHDREffect::isBrowserWindow(EffectWindow *window) const
+    {
+        if (!window) {
+            return false;
+        }
+        const WindowIdentifiers ids = identifiersForWindow(window);
+        const auto matchesBrowser = [](const QString &value) {
+            const QString lower = value.toLower();
+            return lower.contains(QStringLiteral("firefox")) || lower.contains(QStringLiteral("zen"))
+                || lower.contains(QStringLiteral("mozilla"));
+        };
+        return matchesBrowser(ids.resourceClass) || matchesBrowser(ids.windowClass);
+    }
+
+    void AutoHDREffect::applyBrowserSdrPreference(EffectWindow *window)
+    {
+        if (!window || !isBrowserWindow(window)) {
+            return;
+        }
+        if (Window *core = window->window()) {
+            core->setPreferredColorDescription(ColorDescription::sRGB);
+        }
+    }
+
+    Item *AutoHDREffect::redirectTargetForWindow(EffectWindow *window) const
+    {
+        if (!window) {
+            return nullptr;
+        }
+        WindowItem *windowItem = window->windowItem();
+        if (!windowItem) {
+            return nullptr;
+        }
+        if (SurfaceItem *surfaceItem = windowItem->surfaceItem()) {
+            return surfaceItem;
+        }
+        return windowItem;
+    }
+
+    void AutoHDREffect::forceWindowRedirectRefresh(EffectWindow *window, OffscreenWindowData *offscreenData)
+    {
+        if (!window || !offscreenData) {
+            return;
+        }
+
+        WindowItem *windowItem = window->windowItem();
+        Item *targetItem = redirectTargetForWindow(window);
+        if (!windowItem || !targetItem) {
+            return;
+        }
+
+        SurfaceItem *surfaceItem = windowItem->surfaceItem();
+        offscreenData->windowEffect = ItemEffect(targetItem);
+        offscreenData->redirectedItem = windowItem;
+        offscreenData->redirectedSurfaceItem = surfaceItem;
+        offscreenData->isDirty = true;
+        offscreenData->contentDamaged = true;
+
+        if (debugPaintEnabled()) {
+            qInfo() << "AutoHDR Effect: forced ItemEffect refresh for" << window->windowClass()
+                    << (surfaceItem ? "surfaceItem" : "windowItem");
+        }
+    }
+
+    void AutoHDREffect::logIdlePaintState(EffectWindow *window, const char *path)
+    {
+        if (!debugPaintEnabled() || !window) {
+            return;
+        }
+
+        static QHash<EffectWindow *, qint64> lastLogMs;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 last = lastLogMs.value(window, 0);
+        if (now - last < 2000) {
+            return;
+        }
+        lastLogMs[window] = now;
+
+        const auto offIt = m_offscreenWindows.find(window);
+        WindowItem *windowItem = window->windowItem();
+        SurfaceItem *surfaceItem = windowItem ? windowItem->surfaceItem() : nullptr;
+        const bool redirectedSurfaceMatches =
+            offIt != m_offscreenWindows.end() && offIt->second->redirectedSurfaceItem == surfaceItem;
+
+        qInfo() << "AutoHDR Effect: paint state" << path << window->windowClass()
+                << "active" << m_activeWindows.contains(window)
+                << "offscreen" << (offIt != m_offscreenWindows.end())
+                << "windowItem" << (windowItem != nullptr)
+                << "surfaceItem" << (surfaceItem != nullptr)
+                << "redirectedSurfaceMatches" << redirectedSurfaceMatches;
+    }
+
+    bool AutoHDREffect::ensureWindowRedirect(EffectWindow *window, OffscreenWindowData *offscreenData)
+    {
+        if (!window || !offscreenData) {
+            return false;
+        }
+
+        WindowItem *windowItem = window->windowItem();
+        Item *targetItem = redirectTargetForWindow(window);
+        if (!windowItem || !targetItem) {
+            return false;
+        }
+
+        SurfaceItem *surfaceItem = windowItem->surfaceItem();
+        if (offscreenData->redirectedItem == windowItem
+            && offscreenData->redirectedSurfaceItem == surfaceItem) {
+            ensureSurfaceColorTracking(window, offscreenData);
+            return false;
+        }
+
+        offscreenData->windowEffect = ItemEffect(targetItem);
+        offscreenData->redirectedItem = windowItem;
+        offscreenData->redirectedSurfaceItem = surfaceItem;
+        offscreenData->isDirty = true;
+        offscreenData->contentDamaged = true;
+        ensureSurfaceColorTracking(window, offscreenData);
+
+        if (debugPaintEnabled()) {
+            qInfo() << "AutoHDR Effect: rebound ItemEffect for" << window->windowClass()
+                    << (surfaceItem ? "surfaceItem" : "windowItem");
+        }
+        return true;
+    }
+
+    void AutoHDREffect::ensureBrowserSurfaceTracking(EffectWindow *window, OffscreenWindowData *offscreenData)
+    {
+        if (!window || !offscreenData || !isBrowserWindow(window) || offscreenData->subsurfaceTreeConnection) {
+            return;
+        }
+
+        SurfaceInterface *surface = window->surface();
+        if (!surface) {
+            return;
+        }
+
+        offscreenData->subsurfaceTreeConnection =
+            connect(surface, &SurfaceInterface::childSubSurfacesChanged, this, [this, window]() {
+                if (!m_activeWindows.contains(window)) {
+                    return;
+                }
+                const auto it = m_offscreenWindows.find(window);
+                if (it == m_offscreenWindows.end()) {
+                    return;
+                }
+
+                if (debugPaintEnabled()) {
+                    qInfo() << "AutoHDR Effect: browser subsurface tree changed for" << window->windowClass();
+                }
+
+                OffscreenWindowData *data = it->second.get();
+                forceWindowRedirectRefresh(window, data);
+                window->addRepaintFull();
+                effects->addRepaintFull();
+            });
+    }
+
+    void AutoHDREffect::ensureSurfaceColorTracking(EffectWindow *window, OffscreenWindowData *offscreenData)
+    {
+        if (!window || !offscreenData) {
+            return;
+        }
+
+        if (!offscreenData->surfaceColorConnection) {
+            SurfaceInterface *surface = window->surface();
+            if (!surface) {
+                ensureBrowserSurfaceTracking(window, offscreenData);
+                return;
+            }
+
+            offscreenData->surfaceColorConnection =
+                connect(surface, &SurfaceInterface::colorDescriptionChanged, this, [this, window]() {
+                    if (!m_activeWindows.contains(window)) {
+                        return;
+                    }
+                    const auto it = m_offscreenWindows.find(window);
+                    if (it == m_offscreenWindows.end()) {
+                        return;
+                    }
+                    if (!isBrowserWindow(window)) {
+                        return;
+                    }
+
+                    if (debugPaintEnabled()) {
+                        qInfo() << "AutoHDR Effect: browser surface color changed for" << window->windowClass();
+                    }
+
+                    applyBrowserSdrPreference(window);
+                    OffscreenWindowData *data = it->second.get();
+                    data->isDirty = true;
+                    data->contentDamaged = true;
+                    forceWindowRedirectRefresh(window, data);
+                    window->addRepaintFull();
+                    effects->addRepaintFull();
+                });
+        }
+
+        ensureBrowserSurfaceTracking(window, offscreenData);
+    }
+
     void AutoHDREffect::redirect(EffectWindow *window)
     {
         if (!window || m_offscreenWindows.contains(window)) {
@@ -1414,12 +1958,12 @@ namespace KWin {
         }
 
         auto data = std::make_unique<OffscreenWindowData>();
-        data->windowEffect = ItemEffect(window->windowItem());
         data->windowDamagedConnection =
             connect(window, &EffectWindow::windowDamaged, this, [this, window]() {
                 const auto it = m_offscreenWindows.find(window);
                 if (it != m_offscreenWindows.end()) {
                     it->second->isDirty = true;
+                    it->second->contentDamaged = true;
                 }
             });
         data->windowExpandedGeometryConnection =
@@ -1428,6 +1972,7 @@ namespace KWin {
             });
 
         m_offscreenWindows.emplace(window, std::move(data));
+        ensureWindowRedirect(window, m_offscreenWindows[window].get());
         m_statusToasts[window].wasOnHdrOutput = AutoHdr::windowOnHdrOutput(window);
         connectWindowOutputTracking(window);
         if (m_offscreenWindows.size() == 1) {
@@ -1448,6 +1993,8 @@ namespace KWin {
 
         disconnect(it->second->windowDamagedConnection);
         disconnect(it->second->windowExpandedGeometryConnection);
+        disconnect(it->second->surfaceColorConnection);
+        disconnect(it->second->subsurfaceTreeConnection);
         disconnectWindowOutputTracking(window);
         m_offscreenWindows.erase(it);
         if (m_offscreenWindows.empty()) {
@@ -1482,6 +2029,7 @@ namespace KWin {
             offscreenData->texture->setWrapMode(GL_CLAMP_TO_EDGE);
             offscreenData->fbo = std::make_unique<GLFramebuffer>(offscreenData->texture.get());
             offscreenData->isDirty = true;
+            offscreenData->contentDamaged = true;
             offscreenData->guidanceValid = false;
             offscreenData->needsGuidanceUpdate = true;
             offscreenData->downsampleTexture.reset();
@@ -1505,11 +2053,14 @@ namespace KWin {
         paintData.setOpacity(1.0);
 
         const int mask = Effect::PAINT_WINDOW_TRANSFORMED | Effect::PAINT_WINDOW_TRANSLUCENT;
+        m_paintingOffscreenCapture = true;
         effects->drawWindow(renderTarget, viewport, window, mask, Region::infinite(), paintData);
+        m_paintingOffscreenCapture = false;
 
         GLFramebuffer::popFramebuffer();
         offscreenData->isDirty = false;
         offscreenData->needsGuidanceUpdate = true;
+        offscreenData->lastCaptureMs = QDateTime::currentMSecsSinceEpoch();
     }
 
     void AutoHDREffect::paintOffscreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
@@ -1638,7 +2189,7 @@ namespace KWin {
 
     bool AutoHDREffect::blocksDirectScanout() const
     {
-        return false;
+        return !m_activeWindows.isEmpty();
     }
 
     void AutoHDREffect::performUnredirect(EffectWindow *window)
@@ -1668,8 +2219,25 @@ namespace KWin {
 
         if (!m_offscreenWindows.contains(window)) {
             redirect(window);
+        } else {
+            auto it = m_offscreenWindows.find(window);
+            if (it != m_offscreenWindows.end()) {
+                ensureWindowRedirect(window, it->second.get());
+            }
         }
+
+        if (isBrowserWindow(window)) {
+            applyBrowserSdrPreference(window);
+            if (!m_loggedBrowserHdrToast) {
+                m_loggedBrowserHdrToast = true;
+                showStatusToast(window,
+                                QStringLiteral("Zen/Firefox: AutoHDR keeps surface redirect alive when idle; "
+                                               "gfx.wayland.hdr off is optional"));
+            }
+        }
+
         window->addRepaintFull();
+        ensureCompositorHeartbeat();
         return true;
     }
 
@@ -1680,6 +2248,7 @@ namespace KWin {
         }
 
         m_activeWindows.remove(window);
+        ensureCompositorHeartbeat();
 
         if (!m_offscreenWindows.contains(window)) {
             m_pendingUnredirects.remove(window);
@@ -1756,7 +2325,16 @@ namespace KWin {
 
     void AutoHDREffect::prePaintScreen(ScreenPrePaintData &data)
     {
+        if (m_compositorFrameTimer.isValid()) {
+            m_lastCompositorFrameMs = m_compositorFrameTimer.elapsed();
+        }
+        m_frameBudgetSkipOrt = m_lastCompositorFrameMs > 14.0 && m_lastCompositorFrameMs > 0.0;
+        finishPendingOrtReadback();
         pollAsyncGuidanceResults();
+        scheduleActiveHdrRepaints();
+        if (anyActiveHdrWindow()) {
+            data.mask |= PAINT_SCREEN_WITH_TRANSFORMED_WINDOWS;
+        }
         m_currentPaintOutput = data.screen;
         if (!m_currentPaintOutput && data.view) {
             m_currentPaintOutput = data.view->logicalOutput();
@@ -1767,7 +2345,23 @@ namespace KWin {
     void AutoHDREffect::postPaintScreen()
     {
         ++m_guidanceFrameCounter;
+        if (!m_compositorFrameTimer.isValid()) {
+            m_compositorFrameTimer.start();
+        } else {
+            m_compositorFrameTimer.restart();
+        }
         m_currentPaintOutput = nullptr;
+        for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
+            EffectWindow *window = it.key();
+            if (!window || !AutoHdr::windowOnHdrOutput(window)) {
+                continue;
+            }
+            window->addRepaintFull();
+            effects->addRepaint(window->expandedGeometry());
+        }
+        if (!m_activeWindows.isEmpty()) {
+            effects->addRepaintFull();
+        }
         effects->postPaintScreen();
     }
 
@@ -1784,6 +2378,16 @@ namespace KWin {
             }
         }
 
+        if (m_activeWindows.contains(w) && AutoHdr::windowOnHdrOutput(w)) {
+            const auto offIt = m_offscreenWindows.find(w);
+            if (offIt != m_offscreenWindows.end()) {
+                ensureWindowRedirect(w, offIt->second.get());
+            }
+            data.setTransformed();
+            w->addRepaintFull();
+            effects->addRepaintFull();
+        }
+
         effects->prePaintWindow(view, w, data);
     }
 
@@ -1792,11 +2396,17 @@ namespace KWin {
     {
         auto it = m_offscreenWindows.find(window);
         if (it == m_offscreenWindows.end()) {
+            logIdlePaintState(window, "no-offscreen");
             effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
             return;
         }
 
         if (m_paintingCompositorMargin) {
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+            return;
+        }
+
+        if (m_paintingOffscreenCapture) {
             effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
             return;
         }
@@ -1808,9 +2418,31 @@ namespace KWin {
             }
         }
 
-        if (!AutoHdr::shouldApplyHdrForPaint(effects, m_currentPaintOutput, viewport)) {
+        const bool activeOnHdr =
+            m_activeWindows.contains(window) && AutoHdr::windowOnHdrOutput(window);
+        if (!activeOnHdr && !AutoHdr::shouldApplyHdrForPaint(effects, m_currentPaintOutput, viewport)) {
+            logIdlePaintState(window, "native-bypass");
+            if (debugPaintEnabled()) {
+                static QSet<EffectWindow *> loggedNativeBypass;
+                if (!loggedNativeBypass.contains(window)) {
+                    loggedNativeBypass.insert(window);
+                    qInfo() << "AutoHDR Effect: native bypass for" << window->windowClass();
+                }
+            }
             effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
             return;
+        }
+
+        OffscreenWindowData *offscreenData = it->second.get();
+        ensureWindowRedirect(window, offscreenData);
+        logIdlePaintState(window, "paintOffscreen");
+
+        if (debugPaintEnabled()) {
+            static QSet<EffectWindow *> loggedPaintOffscreen;
+            if (!loggedPaintOffscreen.contains(window)) {
+                loggedPaintOffscreen.insert(window);
+                qInfo() << "AutoHDR Effect: paintOffscreen path for" << window->windowClass();
+            }
         }
 
         const RectF frameGeometry = snapToPixels(window->frameGeometry(), viewport.scale());
@@ -1929,9 +2561,20 @@ namespace KWin {
         m_config->reparseConfiguration();
         loadGlobalDefaults(false);
         reloadActiveWindowSettings();
+        if (m_calibrationOverlay) {
+            m_calibrationOverlay->setGlobalAiEnabled(m_aiEnabledGlobal && !m_aiForceDisabled);
+        }
         qInfo() << "AutoHDR Effect: perceptual color" << (m_perceptualColorEnabled ? "enabled" : "disabled");
-        qInfo() << "AutoHDR Effect: AI enhanced" << (m_aiEnabledGlobal && !m_aiForceDisabled)
+        qInfo() << "AutoHDR Effect: AI global" << (m_aiEnabledGlobal && !m_aiForceDisabled)
                 << "backend" << activeGuidanceBackendLabel() << "strength" << m_aiStrengthGlobal;
+        for (auto it = m_activeWindows.constBegin(); it != m_activeWindows.constEnd(); ++it) {
+            if (!it.key()) {
+                continue;
+            }
+            qInfo() << "AutoHDR Effect: AI per-app" << it.key()->windowClass()
+                    << "enabled" << it.value().aiEnhanced
+                    << "effective" << shouldUseAi(it.value());
+        }
         repaintActiveWindows();
     }
 
@@ -1955,6 +2598,7 @@ namespace KWin {
         m_perceptualColorEnabled = m_calibrationOverlay->perceptualColorEnabled();
         AutoHdr::sanitizeCalibrationSettings(m_calibrationDraft, m_hdrReferenceNits, m_hdrMaxDisplayNits, m_config);
         m_calibrationDraftActive = true;
+        invalidateAllGuidance();
 
         if (m_activeWindows.contains(m_calibratingWindow)) {
             m_activeWindows.insert(m_calibratingWindow, m_calibrationDraft);
@@ -2235,6 +2879,7 @@ namespace KWin {
         overlay->setHdrLimits(qRound(m_hdrReferenceNits) + 1, qRound(m_hdrMaxDisplayNits));
         overlay->setValues(m_calibrationDraft);
         overlay->setPerceptualColorEnabled(m_perceptualColorEnabled);
+        overlay->setGlobalAiEnabled(m_aiEnabledGlobal && !m_aiForceDisabled);
 
         connect(overlay, &CalibrationOverlay::settingsChanged, this, &AutoHDREffect::applyCalibrationDraft);
         connect(overlay, &CalibrationOverlay::settingsCommitted, this, &AutoHDREffect::applyCalibrationDraft);

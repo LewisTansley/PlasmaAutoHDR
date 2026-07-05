@@ -46,14 +46,7 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
 
     const auto quantFlat = [](float delta) {
         constexpr float s = 1.0f / 255.0f;
-        const float d = std::abs(delta);
-        if (d <= s + 1.0e-4f) {
-            return 1.0f;
-        }
-        if (d >= s * 2.0f) {
-            return 0.0f;
-        }
-        return 1.0f - (d - (s + 1.0e-4f)) / (s * 2.0f - (s + 1.0e-4f));
+        return std::exp(-std::abs(delta) / (s * 1.5f));
     };
 
     const auto smoothstep = [](float edge0, float edge1, float x) {
@@ -88,7 +81,12 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
             const float highlightLift = std::clamp((centerLuma - 0.45f) / 0.53f, 0.0f, 1.0f);
             const float shoulderBand = smoothstep(0.85f, 0.95f, centerLuma);
             const float shoulderDetail = shoulderBand * flatness;
+            const float rampGrad =
+                smoothstep(0.003f, 0.025f, grad) * (1.0f - smoothstep(0.08f, 0.18f, grad));
             float confidence = std::max(highlightConf, shoulderDetail * 0.85f);
+            if (rampGrad > 0.01f && centerLuma > 0.82f) {
+                confidence = std::max(confidence, highlightConf * rampGrad);
+            }
             float expansion = 1.0f + confidence * highlightLift * 0.75f;
 
             const float shadowCore = 1.0f - smoothstep(0.0f, 0.14f, centerLuma);
@@ -104,11 +102,11 @@ void runCpuGuidance(const float *inputRgb, int width, int height, float *outputR
 
             const float midBand =
                 smoothstep(0.05f, 0.15f, centerLuma) * (1.0f - smoothstep(0.70f, 0.88f, centerLuma));
-            const float rampGrad =
-                smoothstep(0.003f, 0.025f, grad) * (1.0f - smoothstep(0.08f, 0.18f, grad));
             const float shadowBand = (1.0f - smoothstep(0.0f, 0.12f, centerLuma)) * rampGrad;
-            const float shoulderBandMask =
+            float shoulderBandMask =
                 smoothstep(0.82f, 0.94f, centerLuma) * flatness * (1.0f - smoothstep(0.08f, 0.18f, grad));
+            const float shoulderRampMask = rampGrad * smoothstep(0.82f, 0.94f, centerLuma);
+            shoulderBandMask = std::max(shoulderBandMask, shoulderRampMask * 0.75f);
             const float regionBand =
                 std::max(shadowBand, std::max(midBand, shoulderBandMask * 0.75f));
             float bandMask = regionBand * std::max(flatness, rampGrad * 0.7f) * softEdge;
@@ -200,7 +198,8 @@ public:
             m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "AutoHDR");
             Ort::SessionOptions options;
             options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            options.SetIntraOpNumThreads(1);
+            options.SetIntraOpNumThreads(2);
+            options.SetInterOpNumThreads(1);
 
             const QString forcedEp = preferredEpFromEnv();
             // AMD-first: Vulkan, then CUDA (NVIDIA), then CPU default.

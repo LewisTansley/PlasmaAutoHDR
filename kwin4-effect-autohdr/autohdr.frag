@@ -130,8 +130,15 @@ vec4 sampleGuidance(vec2 uv)
     if (aiEnhanced <= 0 || aiStrength <= 1e-4) {
         return vec4(1.0, 0.0, 0.0, 0.0);
     }
-    vec4 guide = texture(guidanceMap, uv);
-    return vec4(max(guide.r, 1.0), clamp(guide.g, 0.0, 1.0), clamp(guide.b, 0.0, 1.0), clamp(guide.a, 0.0, 1.0));
+    vec2 texel = vec2(1.0) / vec2(max(textureSize(guidanceMap, 0), ivec2(1)));
+    vec4 c = texture(guidanceMap, uv);
+    vec4 n = texture(guidanceMap, uv + vec2(0.0, texel.y));
+    vec4 s = texture(guidanceMap, uv - vec2(0.0, texel.y));
+    vec4 e = texture(guidanceMap, uv + vec2(texel.x, 0.0));
+    vec4 w = texture(guidanceMap, uv - vec2(texel.x, 0.0));
+    float rSmooth = max((c.r + n.r + s.r + e.r + w.r) * 0.2, 1.0);
+    float gSmooth = clamp((c.g + n.g + s.g + e.g + w.g) * 0.2, 0.0, 1.0);
+    return vec4(rSmooth, gSmooth, clamp(c.b, 0.0, 1.0), clamp(c.a, 0.0, 1.0));
 }
 
 vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, float pooledCurveInputNits,
@@ -148,7 +155,8 @@ vec3 toneMapPipeline(vec3 rgb, float ref, float displayPeak, float curveSpan, fl
                              guidance.b, bandW);
         rgb = applyShadowDetail(rgb, ref, guidance.b, strength, localAvgNits, localRangeNits);
         rgb = reconstructHighlights(rgb, ref);
-        rgb = applyHighlightDetail(rgb, ref, guidance.g, strength);
+        rgb = applyHighlightRampDecontour(rgb, ref, guidance.g, strength, localAvgNits, localRangeNits);
+        rgb = applyHighlightShoulder(rgb, ref, max(guidance.r, 1.0), guidance.g, strength);
     } else {
         rgb = reconstructHighlights(rgb, ref);
     }

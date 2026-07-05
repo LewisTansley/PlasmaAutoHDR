@@ -134,6 +134,20 @@ bool CalibrationOverlay::perceptualColorEnabled() const
     return m_perceptualColor->isChecked();
 }
 
+void CalibrationOverlay::setGlobalAiEnabled(bool enabled)
+{
+    m_aiEnhanced->setEnabled(enabled);
+    m_aiStrength->setEnabled(enabled);
+    if (enabled) {
+        m_aiEnhanced->setToolTip(
+            tr("Recovers shadow and highlight micro-detail lost to 8-bit SDR, adds perceptual "
+               "depth in flat midtones, and expands lights, sky, and speculars."));
+    } else {
+        m_aiEnhanced->setToolTip(
+            tr("Enable content-aware detail recovery in System Settings → AutoHDR first."));
+    }
+}
+
 void CalibrationOverlay::setValues(const AutoHdr::CalibrationSettings &settings)
 {
     m_editor->setValues(settings.maxNits, settings.referenceNits, settings.sdrMaxPoint, settings.toneCurvePoints,

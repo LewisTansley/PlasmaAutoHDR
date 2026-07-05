@@ -32,7 +32,7 @@ float satOf(vec3 rgb)
 float quantFlat(float delta)
 {
     float d = abs(delta);
-    return 1.0 - smoothstep(INV_255 + 1.0e-4, INV_255 * 2.0, d);
+    return exp(-d / (INV_255 * 1.5));
 }
 
 void main()
@@ -71,11 +71,15 @@ void main()
     float flatness = flatAccum * 0.125;
 
     // --- Highlight expansion / confidence (v0 formula + shoulder flatness) ---
+    float rampGrad = smoothstep(0.003, 0.025, grad) * (1.0 - smoothstep(0.08, 0.18, grad));
     float highlightConf = clamp((centerLuma - 0.55) / 0.40, 0.0, 1.0);
     float highlightLift = clamp((centerLuma - 0.45) / 0.53, 0.0, 1.0);
     float shoulderBand = smoothstep(0.85, 0.95, centerLuma);
     float shoulderDetail = shoulderBand * flatness;
     float confidence = max(highlightConf, shoulderDetail * 0.85);
+    if (rampGrad > 0.01 && centerLuma > 0.82) {
+        confidence = max(confidence, highlightConf * rampGrad);
+    }
     float expansion = 1.0 + confidence * highlightLift * 0.75;
 
     // --- Shadow detail mask (core + transition band) ---
@@ -89,10 +93,11 @@ void main()
     float shadowMask = shadowRegion * max(flatness, max(lowVar * 0.85, mildGrad * 1.15)) * shadowSoft;
 
     // --- Banding mask: shadow + midtone + shoulder ramps ---
-    float rampGrad = smoothstep(0.003, 0.025, grad) * (1.0 - smoothstep(0.08, 0.18, grad));
     float shadowBand = (1.0 - smoothstep(0.0, 0.12, centerLuma)) * rampGrad;
     float midBand = smoothstep(0.05, 0.15, centerLuma) * (1.0 - smoothstep(0.70, 0.88, centerLuma));
     float shoulderBandMask = smoothstep(0.82, 0.94, centerLuma) * flatness * (1.0 - smoothstep(0.08, 0.18, grad));
+    float shoulderRampMask = rampGrad * smoothstep(0.82, 0.94, centerLuma);
+    shoulderBandMask = max(shoulderBandMask, shoulderRampMask * 0.75);
     float regionBand = max(shadowBand, max(midBand, shoulderBandMask * 0.75));
     float bandMask = regionBand * max(flatness, rampGrad * 0.7) * softEdge;
 

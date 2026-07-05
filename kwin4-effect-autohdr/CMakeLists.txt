@@ -71,7 +71,7 @@ if(AUTOHDR_HAS_ONNX_RUNTIME)
 endif()
 
 install(FILES autohdr.frag autohdr_color.glsl autohdr_perceptual.glsl
-    autohdr_downsample.frag autohdr_guidance.frag
+    autohdr_downsample.frag autohdr_guidance.frag autohdr_guidance_blend.frag
     DESTINATION ${KDE_INSTALL_DATADIR}/kwin/effects/autohdr)
 install(FILES models/guidance_v2.onnx models/guidance_v2.onnx.data
     models/guidance_v1.onnx models/guidance_v0.onnx
