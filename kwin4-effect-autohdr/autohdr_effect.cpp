@@ -765,14 +765,61 @@ namespace KWin {
         return descriptor && descriptor->usesAsyncOrt;
     }
 
+    bool AutoHDREffect::isLiveOffscreenData(const OffscreenWindowData *data) const
+    {
+        if (!data) {
+            return false;
+        }
+        for (const auto &entry : m_offscreenWindows) {
+            if (entry.second.get() == data) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void AutoHDREffect::invalidateAsyncGuidanceFor(OffscreenWindowData *data)
+    {
+        const bool matchAll = data == nullptr;
+        bool hadMatch = matchAll;
+
+        if (matchAll || m_asyncGuidanceTarget == data) {
+            m_asyncGuidanceTarget = nullptr;
+            ++m_asyncGuidanceGeneration;
+            hadMatch = true;
+        }
+        if (matchAll || m_ortPboReadTarget == data) {
+            m_ortPboReadPending = false;
+            m_ortPboReadTarget = nullptr;
+            m_ortPboReadW = 0;
+            m_ortPboReadH = 0;
+            hadMatch = true;
+        }
+        if (hadMatch && m_guidanceWorker) {
+            m_guidanceWorker->cancelInflight();
+        }
+    }
+
+    void AutoHDREffect::invalidateAsyncGuidanceForWindow(EffectWindow *window)
+    {
+        if (!window) {
+            return;
+        }
+        const auto it = m_offscreenWindows.find(window);
+        if (it == m_offscreenWindows.end()) {
+            return;
+        }
+        invalidateAsyncGuidanceFor(it->second.get());
+    }
+
     void AutoHDREffect::initGuidanceInference()
     {
+        invalidateAsyncGuidanceFor(nullptr);
+
         if (m_guidanceWorker) {
             m_guidanceWorker->shutdown();
             m_guidanceWorker.reset();
         }
-        m_asyncGuidanceGeneration = 0;
-        m_asyncGuidanceTarget = nullptr;
 
         if (m_aiForceDisabled) {
             m_guidanceInference.reset();
@@ -849,6 +896,14 @@ namespace KWin {
         if (!m_ortPboReadPending || !m_ortPboReadTarget || m_ortPboReadW <= 0 || m_ortPboReadH <= 0
             || !m_guidanceWorker) {
             m_ortPboReadPending = false;
+            return;
+        }
+
+        if (!isLiveOffscreenData(m_ortPboReadTarget)) {
+            m_ortPboReadPending = false;
+            m_ortPboReadTarget = nullptr;
+            m_ortPboReadW = 0;
+            m_ortPboReadH = 0;
             return;
         }
 
@@ -975,6 +1030,9 @@ namespace KWin {
         if (!offscreenData || !offscreenData->ortOutputTexture || !rgba || ortW <= 0 || ortH <= 0) {
             return;
         }
+        if (!isLiveOffscreenData(offscreenData)) {
+            return;
+        }
 
         offscreenData->ortOutputTexture->bind();
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ortW, ortH, GL_RGBA, GL_FLOAT, rgba);
@@ -1011,8 +1069,12 @@ namespace KWin {
         }
 
         OffscreenWindowData *target = m_asyncGuidanceTarget;
-        if (!target || resultGeneration != m_asyncGuidanceGeneration || !target->guidanceTexture
-            || target->ortInferenceSize.width() != width || target->ortInferenceSize.height() != height) {
+        if (!target || !isLiveOffscreenData(target) || resultGeneration != m_asyncGuidanceGeneration
+            || !target->guidanceTexture || target->ortInferenceSize.width() != width
+            || target->ortInferenceSize.height() != height) {
+            if (target && !isLiveOffscreenData(target)) {
+                m_asyncGuidanceTarget = nullptr;
+            }
             return;
         }
 
@@ -1419,7 +1481,9 @@ namespace KWin {
     void AutoHDREffect::updateGuidanceMap(EffectWindow *window, OffscreenWindowData *offscreenData,
                                           const CalibrationSettings &settings)
     {
-        Q_UNUSED(window)
+        if (!window || m_pendingUnredirects.contains(window)) {
+            return;
+        }
         if (!offscreenData || !offscreenData->texture || !shouldUseAi(settings)) {
             return;
         }
@@ -1996,6 +2060,7 @@ namespace KWin {
         disconnect(it->second->surfaceColorConnection);
         disconnect(it->second->subsurfaceTreeConnection);
         disconnectWindowOutputTracking(window);
+        invalidateAsyncGuidanceFor(it->second.get());
         m_offscreenWindows.erase(it);
         if (m_offscreenWindows.empty()) {
             destroyOffscreenConnections();
@@ -2255,6 +2320,7 @@ namespace KWin {
             return;
         }
 
+        invalidateAsyncGuidanceForWindow(window);
         m_pendingUnredirects.insert(window);
         window->addRepaintFull();
         effects->addRepaintFull();
@@ -2315,6 +2381,9 @@ namespace KWin {
         }
 
         for (EffectWindow *window : toDeactivate) {
+            if (m_calibrationOverlay && window == m_calibratingWindow) {
+                continue;
+            }
             scheduleUnredirect(window);
         }
 
@@ -2407,6 +2476,11 @@ namespace KWin {
         }
 
         if (m_paintingOffscreenCapture) {
+            effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
+            return;
+        }
+
+        if (m_pendingUnredirects.contains(window)) {
             effects->drawWindow(renderTarget, viewport, window, mask, deviceRegion, data);
             return;
         }
@@ -2561,6 +2635,7 @@ namespace KWin {
         m_config->reparseConfiguration();
         loadGlobalDefaults(false);
         reloadActiveWindowSettings();
+        reevaluateAllWindows();
         if (m_calibrationOverlay) {
             m_calibrationOverlay->setGlobalAiEnabled(m_aiEnabledGlobal && !m_aiForceDisabled);
         }
@@ -2821,6 +2896,8 @@ namespace KWin {
 
     void AutoHDREffect::closeCalibrationOverlay(bool saved)
     {
+        EffectWindow *calibratingWindow = m_calibratingWindow;
+
         if (m_frameGeometryConnection) {
             disconnect(m_frameGeometryConnection);
             m_frameGeometryConnection = QMetaObject::Connection();
@@ -2834,6 +2911,8 @@ namespace KWin {
             m_calibrationOverlay->deleteLater();
             m_calibrationOverlay = nullptr;
         }
+
+        invalidateAsyncGuidanceForWindow(calibratingWindow);
 
         if (!saved && m_calibrationDraftActive) {
             restoreCalibrationBaseline();

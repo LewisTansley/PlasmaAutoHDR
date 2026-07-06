@@ -18,15 +18,26 @@ GuidanceWorker::~GuidanceWorker()
     shutdown();
 }
 
+void GuidanceWorker::cancelInflight()
+{
+    QMutexLocker lock(&m_mutex);
+    ++m_submitGeneration;
+    m_hasWork = false;
+    m_resultReady = false;
+    m_jobFailed = false;
+}
+
 void GuidanceWorker::shutdown()
 {
     {
         QMutexLocker lock(&m_mutex);
         m_shutdown = true;
+        ++m_submitGeneration;
+        m_hasWork = false;
         m_workAvailable.wakeAll();
     }
     if (isRunning()) {
-        wait(5000);
+        wait();
     }
 }
 

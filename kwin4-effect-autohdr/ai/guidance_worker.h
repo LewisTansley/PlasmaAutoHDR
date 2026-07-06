@@ -29,6 +29,7 @@ public:
     bool tryTakeResult(std::vector<float> *outputRgba, int *width, int *height, uint64_t *resultGeneration = nullptr);
     bool takeFailedJob();
     bool hasInflightWork();
+    void cancelInflight();
     void shutdown();
 
 protected:

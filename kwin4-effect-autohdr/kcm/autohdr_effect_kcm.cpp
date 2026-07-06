@@ -78,13 +78,6 @@ void notifyKWin()
                                                                 QStringLiteral("org.kde.kwin.effect.autohdr"),
                                                                 QStringLiteral("reloadSettings"));
     bus.call(reloadMessage);
-
-    QDBusMessage reconfigureMessage = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"),
-                                                                     QStringLiteral("/Effects"),
-                                                                     QStringLiteral("org.kde.kwin.Effects"),
-                                                                     QStringLiteral("reconfigureEffect"));
-    reconfigureMessage.setArguments({QStringLiteral("kwin4_effect_autohdr")});
-    bus.call(reconfigureMessage);
 }
 
 } // namespace

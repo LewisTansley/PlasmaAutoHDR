@@ -135,6 +135,9 @@ namespace KWin {
         bool isGuidanceV2Model(const QString &modelPath) const;
         QSize capGuidanceSizeForOrt(const QSize &size) const;
         void pollAsyncGuidanceResults();
+        bool isLiveOffscreenData(const OffscreenWindowData *data) const;
+        void invalidateAsyncGuidanceFor(OffscreenWindowData *data);
+        void invalidateAsyncGuidanceForWindow(EffectWindow *window);
         void scheduleActiveHdrRepaints();
         void ensureCompositorHeartbeat();
         void onCompositorHeartbeat();
