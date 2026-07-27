@@ -2,6 +2,8 @@
 
 A KWin desktop effect for KDE Plasma 6. It tone-maps individual windows so SDR and mixed-content apps look better on an HDR display. The effect description in KWin is "spatial illumination matching for Plasma 6".
 
+For a **DE-agnostic Vulkan layer** (games/DXVK clients, any WM including niri once HDR lands), see [AutoHDR-VK](https://github.com/LewisTansley/AutoHDR-VK).
+
 ## What it does
 
 When AutoHDR is active on a window, KWin redirects that window offscreen and runs a GLSL fragment shader on it. The shader applies black point adjustment, a tone curve lookup table, vibrance, and gamut expansion. It reads KDE's HDR calibration (reference white and peak luminance) from your existing display settings and stores per-application profiles on disk.
